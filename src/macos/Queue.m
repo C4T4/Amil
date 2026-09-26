@@ -8,8 +8,10 @@
 
 static const CGFloat kPad = 36;
 static const CGFloat kRowH = 56;
-static const CGFloat kStepH = 36;
+static const CGFloat kStepH = 44;
 static const CGFloat kChipH = 26;
+/* Right-hand controls of a step row, measured in from the right edge. */
+static const CGFloat kStepCtlW = 314;
 
 static BOOL ATPipelineReady(void) {
     uint32_t n = at_control_ext_count();
@@ -41,20 +43,6 @@ static NSString *ATSupport(NSString *leaf) {
             stringByAppendingPathComponent:leaf];
 }
 
-static NSString *ATNextAgent(NSString *cur) {
-    uint32_t n = at_agent_count();
-    if (!n) return @"grok";
-    uint32_t found = 0;
-    const char *c = cur.UTF8String ?: "";
-    for (uint32_t i = 0; i < n; i++) {
-        if (strcmp(at_agent_at(i)->id, c) == 0) {
-            found = i;
-            break;
-        }
-    }
-    return @(at_agent_at((found + 1) % n)->id);
-}
-
 typedef NS_ENUM(NSInteger, ATQHit) {
     ATQHitWorkflow = 1,
     ATQHitWorkflowNew,
@@ -64,8 +52,14 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     ATQHitStepAgent,
     ATQHitStepKind,
     ATQHitStepRemove,
+    ATQHitStepUp,
+    ATQHitStepDown,
     ATQHitStepAdd,
+    ATQHitRun,
+    ATQHitNewTab,
     ATQHitApprove,
+    ATQHitDismiss,
+    ATQHitOpen,
 };
 
 @interface ATQStep : NSObject
@@ -133,12 +127,11 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 @end
 
 @interface ATQueueView () <NSTextFieldDelegate>
+- (CGFloat)stepsTop;
 @end
 
 @implementation ATQueueView {
     NSTextField *_field;
-    NSButton *_run;
-    NSButton *_newTab;
     NSMutableArray<ATQFlow *> *_flows;
     ATQFlow *_flow;
     NSMutableArray<NSDictionary *> *_jobs;
@@ -147,6 +140,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     NSTextField *_edit;
     void (^_editCommit)(NSString *);
     BOOL _editing;
+    BOOL _newTabOn;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -166,14 +160,6 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     _field.focusRingType = NSFocusRingTypeNone;
     _field.delegate = self;
     [self addSubview:_field];
-    _run = [NSButton buttonWithTitle:@"Run" target:self action:@selector(run:)];
-    _run.bezelStyle = NSBezelStyleRounded;
-    [self addSubview:_run];
-    _newTab = [NSButton checkboxWithTitle:@"New tab" target:nil action:nil];
-    _newTab.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    _newTab.contentTintColor = ATColorMuted();
-    _newTab.state = NSControlStateValueOff;
-    [self addSubview:_newTab];
     [self loadFlows];
     [self reload];
     return self;
@@ -215,18 +201,43 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     };
 }
 
-- (CGFloat)chromeBottom {
-    NSUInteger n = _flow.steps.count;
-    return 28 + 22 + kChipH + 16 + 22 + n * kStepH + 28;
+- (NSUInteger)chipRowsForWidth:(CGFloat)w {
+    if (w < 1) w = 800;
+    CGFloat x = kPad;
+    NSUInteger rows = 1;
+    NSDictionary *attrs = @{ NSFontAttributeName: self.metaFont };
+    for (ATQFlow *f in _flows) {
+        NSString *title = f.name.length ? f.name : @"Untitled";
+        CGFloat cw = MIN([title sizeWithAttributes:attrs].width + 20, 180);
+        if (f == _flow) cw += 18;
+        if (x > kPad && x + cw > w - kPad) {
+            rows++;
+            x = kPad;
+        }
+        x += cw + 6;
+    }
+    if (x > kPad && x + 28 > w - kPad) rows++;
+    return MAX(rows, 1);
+}
+
+- (CGFloat)stepsTop {
+    NSUInteger rows = [self chipRowsForWidth:NSWidth(self.bounds)];
+    return 28 + 22 + 18 + rows * (kChipH + 6) - 6 + 16 + 22;
+}
+
+/* Below the last step sits "add step", then a rule, then the run bar. */
+- (CGFloat)addStepTop {
+    return [self stepsTop] + _flow.steps.count * kStepH + 6;
+}
+
+- (CGFloat)taskTop {
+    return [self addStepTop] + 26 + 26;
 }
 
 - (void)layout {
     [super layout];
-    CGFloat y = [self chromeBottom] + 8;
     CGFloat w = NSWidth(self.bounds);
-    _field.frame = NSMakeRect(kPad, y, w - kPad * 2 - 88 - 92, 28);
-    _newTab.frame = NSMakeRect(w - kPad - 80 - 92, y, 88, 28);
-    _run.frame = NSMakeRect(w - kPad - 80, y - 1, 80, 30);
+    _field.frame = NSMakeRect(kPad + 1, [self taskTop] + 1, w - kPad * 2 - 200, 30);
 }
 
 - (void)hit:(ATQHit)k i:(NSInteger)i rect:(NSRect)r {
@@ -297,10 +308,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         job[@"dir"] = [root stringByAppendingPathComponent:name];
         [_jobs addObject:job];
     }
-    BOOL on = ATPipelineReady();
-    _field.enabled = on;
-    _run.enabled = on;
-    _newTab.enabled = on;
+    _field.enabled = ATPipelineReady();
     if (!_editing) {
         [self setNeedsDisplay:YES];
         [self setNeedsLayout:YES];
@@ -321,7 +329,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     for (ATQStep *s in _flow.steps) [steps addObject:[s json]];
     NSDictionary *args = @{
         @"task": task,
-        @"new_tab": @(_newTab.state == NSControlStateValueOn),
+        @"new_tab": @(_newTabOn),
         @"workflow": _flow.fid ?: @"",
         @"agent": _flow.steps.firstObject.agent ?: @"grok",
         @"steps": steps,
@@ -394,7 +402,75 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 }
 
 - (void)controlTextDidEndEditing:(NSNotification *)n {
-    if (n.object == _edit) [self finishEdit:YES];
+    if (n.object == _edit) {
+        [self finishEdit:YES];
+        return;
+    }
+}
+
+- (void)stepChanged {
+    [self saveCurrent];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)moveStep:(NSInteger)delta from:(NSInteger)index {
+    if (index < 0 || (NSUInteger)index >= _flow.steps.count) return;
+    NSInteger dest = index + delta;
+    if (dest < 0 || (NSUInteger)dest >= _flow.steps.count) return;
+    ATQStep *s = _flow.steps[(NSUInteger)index];
+    [_flow.steps removeObjectAtIndex:(NSUInteger)index];
+    [_flow.steps insertObject:s atIndex:(NSUInteger)dest];
+    [self stepChanged];
+}
+
+- (void)removeStepAt:(NSInteger)index {
+    if (_flow.steps.count <= 1) {
+        NSBeep();
+        return;
+    }
+    if (index < 0 || (NSUInteger)index >= _flow.steps.count) return;
+    [_flow.steps removeObjectAtIndex:(NSUInteger)index];
+    [self stepChanged];
+}
+
+- (void)addStep {
+    NSUInteger n = _flow.steps.count + 1;
+    [_flow.steps addObject:[ATQStep agent:[NSString stringWithFormat:@"step %lu", (unsigned long)n]]];
+    [self stepChanged];
+}
+
+/* The agent chip opens the real agent list rather than cycling blindly. */
+- (void)pickAgentFor:(NSInteger)index at:(NSPoint)p {
+    if (index < 0 || (NSUInteger)index >= _flow.steps.count) return;
+    ATQStep *step = _flow.steps[(NSUInteger)index];
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Agent"];
+    uint32_t n = at_agent_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const ATAgentInfo *a = at_agent_at(i);
+        if (!a || !a->id) continue;
+        NSString *aid = @(a->id);
+        NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:ATAgentDisplayName(aid)
+                                                    action:@selector(agentPicked:)
+                                             keyEquivalent:@""];
+        it.target = self;
+        it.representedObject = @{ @"i": @(index), @"id": aid };
+        NSImage *img = ATAgentImage(aid);
+        img.size = NSMakeSize(14, 14);
+        it.image = img;
+        it.state = [step.agent isEqualToString:aid] ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:it];
+    }
+    [menu popUpMenuPositioningItem:nil atLocation:p inView:self];
+}
+
+- (void)agentPicked:(NSMenuItem *)item {
+    NSDictionary *d = item.representedObject;
+    if (![d isKindOfClass:[NSDictionary class]]) return;
+    NSInteger i = [d[@"i"] integerValue];
+    if (i < 0 || (NSUInteger)i >= _flow.steps.count) return;
+    _flow.steps[(NSUInteger)i].agent = d[@"id"];
+    [self stepChanged];
 }
 
 - (void)drawRect:(NSRect)dirty {
@@ -404,7 +480,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     [_hits removeAllObjects];
     CGFloat w = NSWidth(self.bounds);
     CGFloat y = 28;
-    [@"QUEUE" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
+    [@"PIPELINE" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
     y += 22;
     [@"WORKFLOWS" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
     y += 18;
@@ -424,7 +500,10 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         NSSize sz = [title sizeWithAttributes:on ? chipA : chipMuted];
         CGFloat cw = MIN(sz.width + 20, 180);
         if (on) cw += 18;
-        if (x + cw > w - kPad - 40) break;
+        if (x > kPad && x + cw > w - kPad) {
+            x = kPad;
+            y += kChipH + 6;
+        }
         NSRect chip = NSMakeRect(x, y, cw, kChipH);
         [[ATColorSurface() colorWithAlphaComponent:on ? 0.95 : 0.55] setFill];
         [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:6 yRadius:6] fill];
@@ -449,7 +528,6 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     y += kChipH + 16;
 
     [@"STEPS" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
-    y += 20;
     NSDictionary *titleA = @{
         NSFontAttributeName: self.titleFont,
         NSForegroundColorAttributeName: ATColorText(),
@@ -462,51 +540,124 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         NSFontAttributeName: self.titleFont,
         NSForegroundColorAttributeName: ATColorBg(),
     };
-    NSArray<ATQStep *> *steps = _flow.steps;
-    for (NSUInteger i = 0; i < steps.count; i++) {
-        ATQStep *s = steps[i];
-        NSRect row = NSMakeRect(kPad, y, w - kPad * 2, kStepH - 4);
+    NSDictionary *onDarkMeta = @{
+        NSFontAttributeName: self.metaFont,
+        NSForegroundColorAttributeName: ATColorBg(),
+    };
+    CGFloat right = w - kPad;
+    CGFloat sy = [self stepsTop];
+    for (NSUInteger i = 0; i < _flow.steps.count; i++) {
+        ATQStep *s = _flow.steps[i];
+        BOOL human = [s.kind isEqualToString:@"human"];
+        NSRect row = NSMakeRect(kPad, sy, w - kPad * 2, kStepH - 6);
         [[ATColorSurface() colorWithAlphaComponent:0.7] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:row xRadius:7 yRadius:7] fill];
+        [[NSBezierPath bezierPathWithRoundedRect:row xRadius:8 yRadius:8] fill];
+        CGFloat mid = NSMidY(row);
+
         NSString *idx = [NSString stringWithFormat:@"%lu", (unsigned long)(i + 1)];
-        [idx drawAtPoint:NSMakePoint(row.origin.x + 10, y + 7) withAttributes:metaA];
+        NSSize isz = [idx sizeWithAttributes:metaA];
+        [idx drawAtPoint:NSMakePoint(row.origin.x + 14, mid - isz.height / 2) withAttributes:metaA];
+
+        /* name — click to rename in place */
         NSString *nm = s.name.length ? s.name : @"do";
-        NSRect nameR = NSMakeRect(row.origin.x + 32, y, 180, kStepH - 4);
-        [nm drawInRect:NSMakeRect(nameR.origin.x, y + 6, 176, 18) withAttributes:titleA];
+        CGFloat nameX = row.origin.x + 36;
+        CGFloat nameW = MAX(80, right - kStepCtlW - 16 - nameX);
+        NSRect nameR = NSMakeRect(nameX, row.origin.y, nameW, row.size.height);
+        NSSize nsz = [nm sizeWithAttributes:titleA];
+        [nm drawInRect:NSMakeRect(nameX, mid - nsz.height / 2, nameW, nsz.height) withAttributes:titleA];
         [self hit:ATQHitStepName i:(NSInteger)i rect:nameR];
 
-        BOOL human = [s.kind isEqualToString:@"human"];
-        if (!human) {
-            NSString *ag = ATAgentDisplayName(s.agent);
-            NSSize asz = [ag sizeWithAttributes:metaA];
-            NSRect agR = NSMakeRect(row.origin.x + 220, y + 4, MAX(asz.width + 12, 56), 22);
-            [[ATColorHair() colorWithAlphaComponent:0.8] setFill];
-            [[NSBezierPath bezierPathWithRoundedRect:agR xRadius:5 yRadius:5] fill];
-            [ag drawAtPoint:NSMakePoint(agR.origin.x + 6, y + 8) withAttributes:metaA];
-            [self hit:ATQHitStepAgent i:(NSInteger)i rect:agR];
+        /* × ↓ ↑ */
+        struct { NSString *g; ATQHit k; CGFloat off; } glyphs[] = {
+            { @"×", ATQHitStepRemove, 22 },
+            { @"↓", ATQHitStepDown, 46 },
+            { @"↑", ATQHitStepUp, 70 },
+        };
+        for (int g = 0; g < 3; g++) {
+            NSRect gr = NSMakeRect(right - glyphs[g].off, mid - 11, 22, 22);
+            NSSize gs = [glyphs[g].g sizeWithAttributes:metaA];
+            [glyphs[g].g drawAtPoint:NSMakePoint(NSMidX(gr) - gs.width / 2, mid - gs.height / 2)
+                      withAttributes:metaA];
+            [self hit:glyphs[g].k i:(NSInteger)i rect:gr];
         }
 
-        NSString *klab = human ? @"human" : @"agent";
-        NSSize ksz = [klab sizeWithAttributes:metaA];
-        NSRect kR = NSMakeRect(NSMaxX(row) - 28 - ksz.width - 16, y + 4, ksz.width + 12, 22);
-        if (human) [ATColorAccent() setFill];
-        else [[ATColorHair() colorWithAlphaComponent:0.8] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:kR xRadius:5 yRadius:5] fill];
-        NSDictionary *kattr = human
-            ? @{ NSFontAttributeName: self.metaFont, NSForegroundColorAttributeName: ATColorBg() }
-            : metaA;
-        [klab drawAtPoint:NSMakePoint(kR.origin.x + 6, y + 8) withAttributes:kattr];
-        [self hit:ATQHitStepKind i:(NSInteger)i rect:kR];
+        /* agent | human, one pill, the live half filled */
+        CGFloat pillW = 116, pillH = 24;
+        NSRect pill = NSMakeRect(right - 70 - 12 - pillW, mid - pillH / 2, pillW, pillH);
+        [[ATColorHair() colorWithAlphaComponent:0.7] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:pill xRadius:12 yRadius:12] fill];
+        NSRect live = NSMakeRect(human ? NSMidX(pill) : pill.origin.x, pill.origin.y,
+                                 pillW / 2, pillH);
+        [ATColorAccent() setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(live, 2, 2) xRadius:10 yRadius:10] fill];
+        NSString *labs[2] = { @"agent", @"human" };
+        for (int h = 0; h < 2; h++) {
+            BOOL lit = (h == 1) == human;
+            NSSize ls = [labs[h] sizeWithAttributes:metaA];
+            CGFloat cx = pill.origin.x + pillW / 4 + (h ? pillW / 2 : 0);
+            [labs[h] drawAtPoint:NSMakePoint(cx - ls.width / 2, mid - ls.height / 2)
+                  withAttributes:lit ? onDarkMeta : metaA];
+        }
+        [self hit:ATQHitStepKind i:(NSInteger)i rect:pill];
 
-        NSRect rm = NSMakeRect(NSMaxX(row) - 22, y + 6, 16, 18);
-        [@"×" drawAtPoint:NSMakePoint(rm.origin.x, y + 5) withAttributes:metaA];
-        [self hit:ATQHitStepRemove i:(NSInteger)i rect:rm];
-        y += kStepH;
+        /* agent chip — opens the agent menu; meaningless on a human step */
+        if (!human) {
+            CGFloat chipW = 104, chipH = 24;
+            NSRect chip = NSMakeRect(pill.origin.x - 12 - chipW, mid - chipH / 2, chipW, chipH);
+            [[ATColorHair() colorWithAlphaComponent:0.7] setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:6 yRadius:6] fill];
+            NSImage *icon = ATAgentImage(s.agent);
+            icon.size = NSMakeSize(13, 13);
+            [icon drawInRect:NSMakeRect(chip.origin.x + 8, mid - 6.5, 13, 13)
+                    fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+            NSString *an = ATAgentDisplayName(s.agent);
+            NSSize as = [an sizeWithAttributes:metaA];
+            [an drawInRect:NSMakeRect(chip.origin.x + 27, mid - as.height / 2, chipW - 27 - 16, as.height)
+            withAttributes:metaA];
+            NSSize cs = [@"⌄" sizeWithAttributes:metaA];
+            [@"⌄" drawAtPoint:NSMakePoint(NSMaxX(chip) - 8 - cs.width, mid - cs.height / 2 - 2)
+               withAttributes:metaA];
+            [self hit:ATQHitStepAgent i:(NSInteger)i rect:chip];
+        }
+        sy += kStepH;
     }
-    NSRect add = NSMakeRect(kPad, y, 110, 24);
-    [@"+  add step" drawAtPoint:NSMakePoint(add.origin.x + 2, y + 4) withAttributes:metaA];
+
+    CGFloat ay = [self addStepTop];
+    NSRect add = NSMakeRect(kPad, ay, 96, 22);
+    NSSize adds = [@"+  add step" sizeWithAttributes:metaA];
+    [@"+  add step" drawAtPoint:NSMakePoint(kPad, ay + (22 - adds.height) / 2) withAttributes:metaA];
     [self hit:ATQHitStepAdd i:0 rect:add];
-    y = [self chromeBottom] + 48;
+
+    /* the rule that separates building a workflow from running one */
+    CGFloat ty = [self taskTop];
+    [[ATColorHair() colorWithAlphaComponent:0.6] setFill];
+    NSRectFill(NSMakeRect(kPad, ty - 15, w - kPad * 2, 1));
+
+    NSRect fieldBox = NSMakeRect(kPad, ty, w - kPad * 2 - 198, 32);
+    [[ATColorSurface() colorWithAlphaComponent:0.7] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:fieldBox xRadius:7 yRadius:7] fill];
+
+    NSRect ntBox = NSMakeRect(right - 178, ty + 8, 16, 16);
+    [[ATColorHair() colorWithAlphaComponent:0.8] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:ntBox xRadius:4 yRadius:4] fill];
+    if (_newTabOn) {
+        [ATColorAccent() setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(ntBox, 4, 4) xRadius:2 yRadius:2] fill];
+    }
+    NSSize nts = [@"new tab" sizeWithAttributes:metaA];
+    [@"new tab" drawAtPoint:NSMakePoint(NSMaxX(ntBox) + 8, ty + 16 - nts.height / 2) withAttributes:metaA];
+    [self hit:ATQHitNewTab i:0 rect:NSMakeRect(ntBox.origin.x, ty, 90, 32)];
+
+    NSRect runR = NSMakeRect(right - 74, ty, 74, 32);
+    BOOL canRun = ATPipelineReady();
+    [(canRun ? ATColorAccent() : [ATColorHair() colorWithAlphaComponent:0.8]) setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:runR xRadius:7 yRadius:7] fill];
+    NSSize rs = [@"Run" sizeWithAttributes:titleA];
+    [@"Run" drawAtPoint:NSMakePoint(NSMidX(runR) - rs.width / 2, NSMidY(runR) - rs.height / 2)
+         withAttributes:canRun ? onDark : metaA];
+    if (canRun) [self hit:ATQHitRun i:0 rect:runR];
+
+    y = ty + 32 + 34;
 
     NSString *blocked = ATPipelineBlocked();
     if (blocked) {
@@ -526,43 +677,81 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     for (NSDictionary *job in _jobs) {
         NSString *task = [job[@"task"] isKindOfClass:[NSString class]] ? job[@"task"] : @"";
         NSString *st = [job[@"status"] isKindOfClass:[NSString class]] ? job[@"status"] : @"";
+        NSString *reason = [job[@"reason"] isKindOfClass:[NSString class]] ? job[@"reason"] : @"";
         int si = 0;
         if ([job[@"step"] isKindOfClass:[NSNumber class]]) si = [job[@"step"] intValue];
         else if ([job[@"step"] isKindOfClass:[NSString class]]) si = [job[@"step"] intValue];
-        NSMutableString *pipe = [NSMutableString new];
         NSArray *sts = [job[@"steps"] isKindOfClass:[NSArray class]] ? job[@"steps"] : @[];
-        if (!sts.count) [pipe appendString:@"(no steps)"];
+        NSMutableString *pipe = [NSMutableString new];
         for (NSUInteger s = 0; s < sts.count; s++) {
-            if (s) [pipe appendString:@" → "];
+            if (s) [pipe appendString:@"  →  "];
             NSString *name = @"step";
             if ([sts[s] isKindOfClass:[NSDictionary class]] && [sts[s][@"name"] isKindOfClass:[NSString class]])
                 name = sts[s][@"name"];
-            if ([st isEqualToString:@"done"]) [pipe appendFormat:@"[%@]", name];
-            else if (s < (NSUInteger)si) [pipe appendFormat:@"[%@]", name];
-            else if (s == (NSUInteger)si) [pipe appendFormat:@"{%@}", name];
+            if ([st isEqualToString:@"done"] || s < (NSUInteger)si) [pipe appendFormat:@"%@ ✓", name];
+            else if (s == (NSUInteger)si) [pipe appendFormat:@"▸ %@", name];
             else [pipe appendString:name];
         }
-        NSString *meta = [NSString stringWithFormat:@"%@ · %@", st, pipe];
+        BOOL failed = [st isEqualToString:@"error"];
+        BOOL finished = failed || [st isEqualToString:@"done"];
+        NSString *shown = st;
+        if ([st isEqualToString:@"needs_you"]) shown = @"needs you";
+        else if ([st isEqualToString:@"human"]) shown = @"waiting for you";
+        else if ([st isEqualToString:@"arming"]) shown = @"starting the agent";
+        else if (failed) shown = @"failed";
+        NSString *tail = failed && reason.length ? reason : pipe;
+        NSString *meta = tail.length ? [NSString stringWithFormat:@"%@  ·  %@", shown, tail] : shown;
         NSRect row = NSMakeRect(kPad, y, w - kPad * 2, kRowH);
+        NSString *tabId = [job[@"tab"] isKindOfClass:[NSString class]] ? job[@"tab"] : @"";
+        if (tabId.length) {
+            [_hits addObject:@{
+                @"k": @(ATQHitOpen),
+                @"i": @0,
+                @"r": [NSValue valueWithRect:row],
+                @"tab": tabId,
+            }];
+        }
         [[ATColorSurface() colorWithAlphaComponent:0.7] setFill];
         [[NSBezierPath bezierPathWithRoundedRect:row xRadius:8 yRadius:8] fill];
-        [task drawInRect:NSMakeRect(row.origin.x + 12, y + 10, row.size.width - 100, 20)
-          withAttributes:titleA];
-        [meta drawAtPoint:NSMakePoint(row.origin.x + 12, y + 32) withAttributes:metaA];
+        if (failed) {
+            [ATColorAccent() setFill];
+            NSRectFill(NSMakeRect(row.origin.x, y + 10, 2, kRowH - 20));
+        }
+        CGFloat rightEdge = NSMaxX(row) - 12;
+
+        /* finished runs can be cleared away; they are not news any more */
+        if (finished) {
+            NSRect x = NSMakeRect(rightEdge - 20, y + (kRowH - 22) / 2.0, 22, 22);
+            NSSize xs = [@"×" sizeWithAttributes:metaA];
+            [@"×" drawAtPoint:NSMakePoint(NSMidX(x) - xs.width / 2, NSMidY(x) - xs.height / 2)
+               withAttributes:metaA];
+            [_hits addObject:@{
+                @"k": @(ATQHitDismiss),
+                @"i": @0,
+                @"r": [NSValue valueWithRect:x],
+                @"dir": job[@"dir"] ?: @"",
+            }];
+            rightEdge -= 30;
+        }
         if ([st isEqualToString:@"human"]) {
             NSString *lab = @"Approve";
             NSSize sz = [lab sizeWithAttributes:titleA];
-            NSRect hit = NSMakeRect(NSMaxX(row) - sz.width - 20, y + (kRowH - 22) / 2.0, sz.width + 8, 22);
+            NSRect hit = NSMakeRect(rightEdge - sz.width - 16, y + (kRowH - 24) / 2.0, sz.width + 16, 24);
             [ATColorAccent() setFill];
             [[NSBezierPath bezierPathWithRoundedRect:hit xRadius:6 yRadius:6] fill];
-            [lab drawAtPoint:NSMakePoint(hit.origin.x + 4, hit.origin.y + 2) withAttributes:onDark];
+            [lab drawAtPoint:NSMakePoint(NSMidX(hit) - sz.width / 2, NSMidY(hit) - sz.height / 2)
+              withAttributes:onDark];
             [_hits addObject:@{
                 @"k": @(ATQHitApprove),
                 @"i": @0,
                 @"r": [NSValue valueWithRect:hit],
                 @"dir": job[@"dir"] ?: @"",
             }];
+            rightEdge = hit.origin.x - 12;
         }
+        CGFloat textW = MAX(60, rightEdge - (row.origin.x + 14));
+        [task drawInRect:NSMakeRect(row.origin.x + 14, y + 11, textW, 20) withAttributes:titleA];
+        [meta drawInRect:NSMakeRect(row.origin.x + 14, y + 33, textW, 16) withAttributes:metaA];
         y += kRowH + 8;
     }
 }
@@ -570,14 +759,13 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 - (void)mouseDown:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     if (_edit && !NSPointInRect(p, _edit.frame)) [self finishEdit:YES];
-    for (NSDictionary *h in _hits) {
+    for (NSDictionary *h in [_hits reverseObjectEnumerator]) {
         NSRect r = [h[@"r"] rectValue];
         if (!NSPointInRect(p, r)) continue;
         ATQHit k = [h[@"k"] integerValue];
         NSInteger i = [h[@"i"] integerValue];
         switch (k) {
         case ATQHitWorkflow:
-            [self saveCurrent];
             if ((NSUInteger)i < _flows.count) _flow = _flows[(NSUInteger)i];
             [self setNeedsDisplay:YES];
             [self setNeedsLayout:YES];
@@ -620,45 +808,55 @@ typedef NS_ENUM(NSInteger, ATQHit) {
             if ((NSUInteger)i >= _flow.steps.count) return;
             ATQStep *s = _flow.steps[(NSUInteger)i];
             [self editIn:r text:s.name commit:^(NSString *name) {
-                NSString *t = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                NSString *t = [name stringByTrimmingCharactersInSet:
+                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
                 if (t.length) s.name = t;
                 [self saveCurrent];
             }];
             return;
         }
-        case ATQHitStepAgent: {
-            if ((NSUInteger)i >= _flow.steps.count) return;
-            ATQStep *s = _flow.steps[(NSUInteger)i];
-            s.agent = ATNextAgent(s.agent);
-            [self saveCurrent];
-            [self setNeedsDisplay:YES];
+        case ATQHitStepAgent:
+            [self pickAgentFor:i at:NSMakePoint(r.origin.x, NSMaxY(r) + 2)];
             return;
-        }
         case ATQHitStepKind: {
             if ((NSUInteger)i >= _flow.steps.count) return;
-            ATQStep *s = _flow.steps[(NSUInteger)i];
-            s.kind = [s.kind isEqualToString:@"human"] ? @"agent" : @"human";
-            [self saveCurrent];
-            [self setNeedsDisplay:YES];
+            _flow.steps[(NSUInteger)i].kind = (p.x > NSMidX(r)) ? @"human" : @"agent";
+            [self stepChanged];
             return;
         }
-        case ATQHitStepRemove: {
-            if (_flow.steps.count <= 1) {
-                NSBeep();
-                return;
-            }
-            if ((NSUInteger)i < _flow.steps.count) [_flow.steps removeObjectAtIndex:(NSUInteger)i];
-            [self saveCurrent];
+        case ATQHitStepUp:
+            [self moveStep:-1 from:i];
+            return;
+        case ATQHitStepDown:
+            [self moveStep:1 from:i];
+            return;
+        case ATQHitStepRemove:
+            [self removeStepAt:i];
+            return;
+        case ATQHitStepAdd:
+            [self addStep];
+            return;
+        case ATQHitNewTab:
+            _newTabOn = !_newTabOn;
             [self setNeedsDisplay:YES];
-            [self setNeedsLayout:YES];
+            return;
+        case ATQHitRun:
+            [self run:nil];
+            return;
+        case ATQHitOpen: {
+            NSString *tab = h[@"tab"];
+            if (!tab.length) return;
+            NSString *args = [NSString stringWithFormat:@"{\"tab\":\"%@\"}", tab];
+            char *out = NULL;
+            at_control_call("tab.focus", args.UTF8String, &out);
+            if (out) at_control_free(out);
             return;
         }
-        case ATQHitStepAdd: {
-            NSUInteger n = _flow.steps.count + 1;
-            [_flow.steps addObject:[ATQStep agent:[NSString stringWithFormat:@"step %lu", (unsigned long)n]]];
-            [self saveCurrent];
-            [self setNeedsDisplay:YES];
-            [self setNeedsLayout:YES];
+        case ATQHitDismiss: {
+            NSString *dir = h[@"dir"];
+            if (!dir.length) return;
+            [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+            [self reload];
             return;
         }
         case ATQHitApprove: {
@@ -669,6 +867,8 @@ typedef NS_ENUM(NSInteger, ATQHit) {
             [self reload];
             return;
         }
+        default:
+            break;
         }
         return;
     }
