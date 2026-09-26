@@ -40,7 +40,7 @@ State lives in `~/Library/Application Support/ATerminal/` (`state.json`, `contro
 
 ## Names
 
-Claude, Grok, ChatGPT, and Gemini are the command-line tools Amil can launch. Those names belong to their owners. The marks in `resources/agents/` are original stand-ins, not their logos.
+Claude, Grok, ChatGPT, and Gemini are the command-line tools Amil can launch. Those names and logos belong to their owners. The icons in `resources/agents/` are only there so a tab shows which tool is running.
 
 ## Contributing
 

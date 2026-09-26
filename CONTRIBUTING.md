@@ -48,7 +48,7 @@ The product name is Amil. The binary is still `aterminal`, the bundle id is `dev
 - Electron, Tauri, SwiftUI, or a web view for the terminal.
 - A background daemon that runs when the app is quit. Agents that should survive a closed window already use the `at-pty` helper, and only when Background is on in Settings.
 - Yolo mode turned on by default. The Settings switch stays off unless the user opts in.
-- Vendor logos for Claude, Grok, ChatGPT, or Gemini. The marks in `resources/agents/` are original stand-ins.
+- Replacing the agent icons with unrelated art. `resources/agents/` shows which CLI a tab is running.
 - Secrets, signing keys, or screenshots from `.aterminal-paste/`.
 
 ## Pull requests
