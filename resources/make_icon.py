@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a Tahoe-safe ATerminal icon: squircle-masked icns from a generated master."""
+"""Build a Tahoe-safe Amil icon: squircle-masked icns from a generated master."""
 
 from pathlib import Path
 

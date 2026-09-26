@@ -4,7 +4,7 @@ Amil is a macOS terminal for the real agent CLIs. Claude, Grok, Codex, and Gemin
 
 One AppKit process owns the window and the terminal. There is no login daemon, no React shell, and no second process painting the screen. [ply](https://github.com/0xR32/ply) does this job with a Bun UI, a LaunchAgent, and three local sockets, and it only launches Claude and Codex, four panes at most. Amil is the same idea without that machinery, and with the rest of the workbench: workspaces, splits, a Dock badge when an agent needs you, and workflows whose steps you define.
 
-The on-disk name is still `ATerminal` so existing sessions keep working. The app you see is Amil.
+The app and its binary are `Amil`. The support folder is still `~/Library/Application Support/ATerminal/`, so sessions made before the rename keep working.
 
 | | ply | Amil |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ macOS 13 or newer. [Zig 0.16.0](https://ziglang.org/download/).
 git clone --recurse-submodules https://github.com/C4T4/Amil.git
 cd Amil
 zig build
-open zig-out/ATerminal.app
+open zig-out/Amil.app
 ```
 
 If `vendor/ghostty` is empty after clone:
@@ -42,7 +42,7 @@ If `vendor/ghostty` is empty after clone:
 git submodule update --init vendor/ghostty
 ```
 
-`zig build` produces `zig-out/ATerminal.app`. The binary inside is `Contents/MacOS/aterminal`. Ghostty’s terminal library is a submodule (`vendor/ghostty`, MIT). Do not commit a Zig toolchain or `zig-out/`.
+`zig build` produces `zig-out/Amil.app`. The binary inside is `Contents/MacOS/amil`. Ghostty’s terminal library is a submodule (`vendor/ghostty`, MIT). Do not commit a Zig toolchain or `zig-out/`.
 
 Optional extension dylibs:
 
@@ -53,7 +53,7 @@ cp zig-out/plugins/libat-pipeline.dylib zig-out/plugins/libat-mcp.dylib \
   "$HOME/Library/Application Support/ATerminal/plugins/"
 ```
 
-Pipeline and MCP also install into `ATerminal.app/Contents/PlugIns` on a normal `zig build`.
+Pipeline and MCP also install into `Amil.app/Contents/PlugIns` on a normal `zig build`.
 
 ## Data
 

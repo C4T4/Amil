@@ -99,7 +99,7 @@ fn hostUnwatch(fd: c_int) callconv(.c) c_int {
 fn hostLog(level: c_int, msg: ?[*:0]const u8) callconv(.c) c_int {
     const m = msg orelse return 0;
     const tag: []const u8 = if (level <= 0) "err" else if (level == 1) "info" else "debug";
-    std.debug.print("aterminal-ext {s}: {s}\n", .{ tag, std.mem.span(m) });
+    std.debug.print("amil-ext {s}: {s}\n", .{ tag, std.mem.span(m) });
     return 0;
 }
 

@@ -14,7 +14,7 @@ cd Amil
 git submodule update --init vendor/ghostty
 zig build
 zig build test
-open zig-out/ATerminal.app
+open zig-out/Amil.app
 ```
 
 `vendor/ghostty` is a submodule. A clone without `--recurse-submodules` will not build. Do not copy a Zig compiler, `zig-out/`, `zig-pkg/`, or `.aterminal-paste/` into a commit.
@@ -41,7 +41,7 @@ zig build test
 | `include/` | C headers for the bus and the store. |
 | `docs/control-plane.md` | Design notes for the bus. Read it before changing the protocol. |
 
-The product name is Amil. The binary is still `aterminal`, the bundle id is `dev.aterminal.app`, and saved state is `~/Library/Application Support/ATerminal/`. Do not rename those in a drive-by change. Existing installs depend on them.
+The product, the bundle and the binary are all `Amil`. The bundle id is still `dev.aterminal.app` and saved state is still `~/Library/Application Support/ATerminal/`: changing either would reset macOS permissions and orphan every existing workspace. Do not rename those in a drive-by change. The control-plane hello (`"server":"aterminal"`), the MCP `serverInfo.name` and the `.aterminal-paste` folder are wire and on-disk values, not branding.
 
 ## What we will not merge
 

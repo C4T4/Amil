@@ -1,8 +1,8 @@
 .{
-    .name = .aterminal,
+    .name = .amil,
     .version = "0.0.1",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x47484b6102367108,
+    .fingerprint = 0x12eaea9464bc3e3f,
     .dependencies = .{
         .ghostty = .{
             .path = "vendor/ghostty",

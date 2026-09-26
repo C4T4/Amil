@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "aterminal",
+        .name = "amil",
         .root_module = root,
     });
     root.addCMacro("GHOSTTY_STATIC", "1");
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     root.linkFramework("CoreText", .{});
     root.linkFramework("CoreGraphics", .{});
 
-    const app_rel = "ATerminal.app";
+    const app_rel = "Amil.app";
     const install_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = app_rel ++ "/Contents/MacOS" } },
     });
@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
-    const run_step = b.step("run", "Run ATerminal");
+    const run_step = b.step("run", "Run Amil");
     run_step.dependOn(&run_cmd.step);
 
     const atctl_mod = b.createModule(.{
@@ -162,7 +162,7 @@ pub fn build(b: *std.Build) void {
     const install_mcp = b.addInstallArtifact(mcp_lib, .{
         .dest_dir = .{ .override = .{ .custom = "plugins" } },
     });
-    const plugins_step = b.step("plugins", "Build extension dylibs (not inside ATerminal.app)");
+    const plugins_step = b.step("plugins", "Build extension dylibs (not inside Amil.app)");
     plugins_step.dependOn(&install_echo.step);
     plugins_step.dependOn(&install_pipeline.step);
     plugins_step.dependOn(&install_mcp.step);

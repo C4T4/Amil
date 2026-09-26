@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>aterminal</string>
+	<string>amil</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.aterminal.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>

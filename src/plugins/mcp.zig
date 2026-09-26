@@ -50,7 +50,7 @@ var bound_port: u16 = 8765;
 
 const tools_json =
     \\{"tools":[
-    \\{"name":"workspace_list","description":"List ATerminal workspaces (id, name, agent, folders).","inputSchema":{"type":"object","properties":{}}},
+    \\{"name":"workspace_list","description":"List Amil workspaces (id, name, agent, folders).","inputSchema":{"type":"object","properties":{}}},
     \\{"name":"workspace_focus","description":"Focus a workspace by id.","inputSchema":{"type":"object","properties":{"workspace":{"type":"string"}},"required":["workspace"]}},
     \\{"name":"tab_list","description":"List tabs in a workspace.","inputSchema":{"type":"object","properties":{"workspace":{"type":"string"}}}},
     \\{"name":"tab_add","description":"Open a new agent tab. agent is grok, claude, codex, or gemini.","inputSchema":{"type":"object","properties":{"workspace":{"type":"string"},"agent":{"type":"string"}}}},

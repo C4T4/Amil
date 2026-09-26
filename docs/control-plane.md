@@ -1,26 +1,26 @@
-# ATerminal Control Plane: Plugin Bus & External Drivers
+# Amil Control Plane: Plugin Bus & External Drivers
 
 | Field | Value |
 | --- | --- |
 | **Title** | Control plane as core: in-process command bus, capability registry, optional transport plugins |
-| **Author** | ATerminal |
+| **Author** | Amil |
 | **Date** | 2026-09-20 (rev 3) |
 | **Status** | Draft |
-| **Product** | ATerminal (macOS AI-first terminal / agent workspace — not an editor or IDE) |
+| **Product** | Amil (macOS AI-first terminal / agent workspace — not an editor or IDE) |
 | **Repo** | `.` |
 
 ---
 
 ## Overview
 
-ATerminal already has a complete in-process mutation API for workspaces, tabs, pane trees, and persistence (`src/store.zig` → `include/aterminal.h`) and a complete UI action surface (`ATWindowController` in `src/macos/App.m`, PTY I/O in `ATTermView`). What it lacks is a **stable, versioned way for code that is not AppKit to invoke those actions** — an iOS client on a Tailscale tailnet, a CLI, or a World of Warcraft addon.
+Amil already has a complete in-process mutation API for workspaces, tabs, pane trees, and persistence (`src/store.zig` → `include/aterminal.h`) and a complete UI action surface (`ATWindowController` in `src/macos/App.m`, PTY I/O in `ATTermView`). What it lacks is a **stable, versioned way for code that is not AppKit to invoke those actions** — an iOS client on a Tailscale tailnet, a CLI, or a World of Warcraft addon.
 
 This design adds a **tiny in-process command bus** in Zig as core, plus a **capability registry**. Everything that talks to the outside world is a **plugin**:
 
 - **Unix socket transport** — cheap enough to ship in-process and on-by-default (one listen fd, GCD source on the main queue, `getpeereid` same-uid). Not a separate process.
-- **HTTP loopback, Tailscale, WoW SavedVariables/chat-log** — optional dylibs, explicit enable, not linked into the default `aterminal` binary.
+- **HTTP loopback, Tailscale, WoW SavedVariables/chat-log** — optional dylibs, explicit enable, not linked into the default `amil` binary.
 
-The app process **is** the server. If ATerminal is quit, clients cannot drive it. No daemon, no helper, no PTY pool, no extra thread storm. Plugins never import AppKit; they call named commands the UI already implements. JSON is allowed on this control plane only — never on the Ghostty render path.
+The app process **is** the server. If Amil is quit, clients cannot drive it. No daemon, no helper, no PTY pool, no extra thread storm. Plugins never import AppKit; they call named commands the UI already implements. JSON is allowed on this control plane only — never on the Ghostty render path.
 
 ---
 
@@ -30,7 +30,7 @@ The app process **is** the server. If ATerminal is quit, clients cannot drive it
 
 | Layer | Where | What it already does |
 | --- | --- | --- |
-| State | `src/store.zig`, C ABI in `include/aterminal.h` | Workspaces, tabs, binary pane tree (max 8 leaves), history, home folder. Atomic `state.json` + `state.recovery.json` + `session.lock` under `~/Library/Application Support/ATerminal/`. |
+| State | `src/store.zig`, C ABI in `include/aterminal.h` | Workspaces, tabs, binary pane tree (max 8 leaves), history, home folder. Atomic `state.json` + `state.recovery.json` + `session.lock` under `~/Library/Application Support/Amil/`. |
 | Agents | `include/at_agents.h`, `src/macos/Agents.m` | Catalog: claude / grok / chatgpt(codex) / gemini. |
 | UI | `src/macos/App.m` (`ATWindowController`) | `selectWorkspace:`, `selectSession:`, `addSessionAgent:`, `splitHoriz:`, `closeSession` / `closeSessionIndex:`, `closeActive`, `createWorkspace:folders:agent:`, `openHistorySession:`, `reload`, `ensureTerm:…`, `activityForTabId:` / `activityForWorkspaceId:`. |
 | PTY | `src/macos/TermView.m` | `forkpty`, Ghostty VT, `writeBytes:length:` (private), image paste via `.aterminal-paste` PNG + `insertPath:` (`@path` for `claude`). Master is `O_NONBLOCK`. Dispatch source on **main queue**. |
@@ -45,7 +45,7 @@ Today the only drivers are the mouse, the menu, and `handleNavEvent:`. That does
 
 1. **No seam.** Store C ABI is in-process and index-based. There is no versioned, id-based, capability-checked RPC that out-of-process clients can speak.
 2. **No auth story.** Binding a TCP port without pairing would expose agent PTYs (prompt injection, exfil of workspace paths) to anything on the interface.
-3. **Size/RAM.** Agents already dominate RSS (Claude CLI ~191MB, Grok ~136MB; not re-measured this revision). Control must not add processes, warm binaries, or idle threads. Current `aterminal` is **13 024 680 bytes (~12.4MB) ReleaseFast arm64**, dominated by `ghostty-vt-static`, not our ~7k lines. Size gates measure **delta vs `main`**, Ghostty excluded from the denominator. Target: PR1+PR2 (bus + ATR1 + unix listen) ≪ 50KB; finished core through pairing/cmds still likely 50–80KB if JSON stays hand-rolled. ~0 idle RAM beyond one listen socket.
+3. **Size/RAM.** Agents already dominate RSS (Claude CLI ~191MB, Grok ~136MB; not re-measured this revision). Control must not add processes, warm binaries, or idle threads. Current `amil` is **13 024 680 bytes (~12.4MB) ReleaseFast arm64**, dominated by `ghostty-vt-static`, not our ~7k lines. Size gates measure **delta vs `main`**, Ghostty excluded from the denominator. Target: PR1+PR2 (bus + ATR1 + unix listen) ≪ 50KB; finished core through pairing/cmds still likely 50–80KB if JSON stays hand-rolled. ~0 idle RAM beyond one listen socket.
 4. **WoW is not a TCP client.** Classic / Forever Lua cannot open sockets or HTTP. Pretending otherwise produces a plugin no addon can use.
 
 ### Constraints (must honor)
@@ -67,7 +67,7 @@ Today the only drivers are the mouse, the menu, and `handleNavEvent:`. That does
 1. **In-process command bus + capability registry** in Zig, with a C ABI AppKit can register into and plugins can call.
 2. **One framed RPC protocol** (`ATR1`) that unix, TCP, HTTP, CLI, iOS, and (via an adapter) WoW all bottom out on.
 3. **Unix transport in the default binary**, same-uid, on-by-default if and only if it stays one `dispatch_source` on the main queue.
-4. **Optional transport plugins** as dylibs, enabled by an explicit list. Default `zig build` does not link or ship them in `ATerminal.app`.
+4. **Optional transport plugins** as dylibs, enabled by an explicit list. Default `zig build` does not link or ship them in `Amil.app`.
 5. **First commands:** list workspaces/tabs/panes, focus, send text/keys to a pane PTY, paste path/PNG, activity (`none` / `standby` / `needs-input` / `working`), start/resume an agent tab, split/close pane, create/close workspace.
 6. **Auth:** unix = `getpeereid` same uid. Anything else = pairing token in the app-support dir. No open relay, no Tailscale Funnel.
 7. **Least privilege per plugin** — the host thunks `call` over that plugin’s mask; transports pass a per-connection `have` into `at_control_call_capped`. Granted = `plugin_mask ∩ token_record ∩ hello_request ∩ op.need`.
@@ -75,7 +75,7 @@ Today the only drivers are the mouse, the menu, and `handleNavEvent:`. That does
 
 ### Non-goals (v1)
 
-- Driving ATerminal when the app is quit (no launchd helper, no `open -a` from a daemon). A future opt-in helper plugin is out of scope.
+- Driving Amil when the app is quit (no launchd helper, no `open -a` from a daemon). A future opt-in helper plugin is out of scope.
 - Embedding `tsnet` / Go / a userspace Tailscale node in-process (binary and RAM blow-up).
 - JSON-RPC 2.0, gRPC, protobuf, Cap'n Proto, XPC, AppleScript, Accessibility-driver control as the protocol.
 - Pane screenshot/snapshot (v2: `pane.snapshot` via `cacheDisplayInRect:` — not on the Ghostty render path, still not v1).
@@ -101,7 +101,7 @@ flowchart TB
     WoW["WoW addon (SavedVariables / chat log — not HTTP)"]
   end
 
-  subgraph app [ATerminal.app process]
+  subgraph app [Amil.app process]
     subgraph core [Core — always linked]
       Bus["control bus + cap registry<br/>src/control/*.zig"]
       Unix["unix transport<br/>control.sock"]
@@ -218,7 +218,7 @@ comptime {
 
 so `export fn at_control_*` land in the executable. **Control never `@import`s `store.zig`.** `cmds.zig` uses `extern fn at_store_workspace_count(...) callconv(.c) u32;` (and the rest of `aterminal.h`). A new `src/root.zig` that imports both is cleaner long-term and is **not** v1 (churn). Do **not** make `src/control.zig` pull AppKit.
 
-Plugin dylibs are **separate** `b.addLibrary(.{ .linkage = .dynamic, ... })` targets (Zig 0.16 has **no** `addSharedLibrary`), installed under `zig-out/plugins/`, **not** copied into `ATerminal.app` by the default install step. `atctl` uses a `root_module` the same way the app exe does — not the removed `.root_source_file` executable shorthand.
+Plugin dylibs are **separate** `b.addLibrary(.{ .linkage = .dynamic, ... })` targets (Zig 0.16 has **no** `addSharedLibrary`), installed under `zig-out/plugins/`, **not** copied into `Amil.app` by the default install step. `atctl` uses a `root_module` the same way the app exe does — not the removed `.root_source_file` executable shorthand.
 
 ### Command bus
 
@@ -365,7 +365,7 @@ offset  size  field
   "server":"aterminal",
   "proto":1,
   "pid":12345,
-  "support_dir":"~/Library/Application Support/ATerminal",
+  "support_dir":"~/Library/Application Support/Amil",
   "caps":["read","focus","input","session","layout","fs","pair"],
   "ops":["core.ping","core.pair","workspace.list","workspace.focus","pane.input"]
 }
@@ -446,7 +446,7 @@ All identifiers are the existing 8-hex `makeId()` strings (`store.zig` `makeId`)
   "workspaces": [
     {
       "id": "3f2a91c0",
-      "name": "ATerminal",
+      "name": "Amil",
       "agent": "claude",
       "folders": ["."],
       "activity": "working",
@@ -475,11 +475,11 @@ All identifiers are the existing 8-hex `makeId()` strings (`store.zig` `makeId`)
 
 ### Unix transport (default binary)
 
-- Path: `~/Library/Application Support/ATerminal/control/control.sock`
+- Path: `~/Library/Application Support/Amil/control/control.sock`
 - Directory mode **0700**, socket **0600**. Do **not** chmod the whole support dir (today `supportDir()` mkdir is `0755` and `state.json` is `0644`).
 - `SOCK_STREAM`. `listen(8)`. Hard cap **8** connected clients; further accepts are closed immediately.
 - After `accept`: `FD_CLOEXEC`, `O_NONBLOCK`, `SO_NOSIGPIPE`, then `getpeereid(fd, &uid, &gid)` (macOS; **not** Linux `SO_PEERCRED`). Reject if `uid != getuid()`. `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` for logs only — not for granting `ADMIN`.
-- **Socket ownership (do not use `session.lock`).** `at_store_open` *always* overwrites `session.lock` with the current pid and has no flock (`writeLock` in `store.zig`). By the time `at_control_start` runs the lock pid is always us, so a second `ATerminal.app` would steal the first instance’s socket. Recipe:
+- **Socket ownership (do not use `session.lock`).** `at_store_open` *always* overwrites `session.lock` with the current pid and has no flock (`writeLock` in `store.zig`). By the time `at_control_start` runs the lock pid is always us, so a second `Amil.app` would steal the first instance’s socket. Recipe:
 
   1. `socket` + `FD_CLOEXEC`.
   2. `connect()` to the existing path.
@@ -516,7 +516,7 @@ New file, same directory as `state.json`, mode 0600, parsed with the shared JSON
 }
 ```
 
-`plugins` is an array of **stems** (`"http"`, `"wow"`, `"tailnet"`). Core maps stem → `~/Library/Application Support/ATerminal/plugins/libat-http.dylib` (then `zig-out/plugins/` is only a build output; the user copies). **No auto-scan of the directory** — that would load surprise dylibs.
+`plugins` is an array of **stems** (`"http"`, `"wow"`, `"tailnet"`). Core maps stem → `~/Library/Application Support/Amil/plugins/libat-http.dylib` (then `zig-out/plugins/` is only a build output; the user copies). **No auto-scan of the directory** — that would load surprise dylibs.
 
 ### Plugin ABI
 
@@ -591,7 +591,7 @@ Optional `at-tailnet` dylib (still opt-in): enumerate the Tailscale IPv4 (`100.x
 
 ```mermaid
 flowchart LR
-  iOS["iOS ATerminal Remote"] -->|HTTPS or TCP + Bearer token| TS["tailnet / MagicDNS"]
+  iOS["iOS Amil Remote"] -->|HTTPS or TCP + Bearer token| TS["tailnet / MagicDNS"]
   TS --> Serve["tailscale serve → 127.0.0.1:17321"]
   Serve --> HTTP["at-http.dylib"]
   HTTP --> Bus["command bus"]
@@ -611,7 +611,7 @@ iOS app is **out of repo for v1**. This design only guarantees: same ops, HTTP/J
 
 Addon communication (`C_ChatInfo.SendAddonMessage`) goes through **Blizzard's chat servers**, not the LAN. SavedVariables are loaded once at addon load and **written on logout / `/reload` only**. That flush-on-reload rule is intentional (anti-bot). Community reports (2026-09) also describe a Forever **cold-start SavedVariables load miss**; this design does **not** depend on that report being true. Treat the file as a one-way queue with monotonic ids either way; never require a round-trip the game must load back.
 
-**Therefore `at-http` is not a WoW addon transport.** The plugin a Forever addon can actually talk to is **file IPC that ATerminal watches**.
+**Therefore `at-http` is not a WoW addon transport.** The plugin a Forever addon can actually talk to is **file IPC that Amil watches**.
 
 #### `at-wow` plugin (opt-in)
 
@@ -638,7 +638,7 @@ ATControlDB = {
 }
 ```
 
-Plugin persists `~/Library/Application Support/ATerminal/wow.cursor` = last executed `id`. On each fire it executes **new ids only**, in order, through `host->call` (wow mask: no `fs`/`admin`/`pair`). Re-running after a duplicate `/reload` is a no-op. A wow-mask `pane.paste_path` must return `denied` (PR7 test).
+Plugin persists `~/Library/Application Support/Amil/wow.cursor` = last executed `id`. On each fire it executes **new ids only**, in order, through `host->call` (wow mask: no `fs`/`admin`/`pair`). Re-running after a duplicate `/reload` is a no-op. A wow-mask `pane.paste_path` must return `denied` (PR7 test).
 
 **Responses cannot enter a live UI.** The addon, on `ADDON_LOADED`, reads **its own SV only**. v1 does **not** write `wow-out.lua` / `ATerminalControl.out.lua` — those files are invisible in-game, so they are dead weight unless a Mac user greps them. If debugging is needed, `ATERMINAL_CONTROL_DEBUG=1` logs op + id + error code (not prompt text). Live round-trip in-game **does not exist** on a stock client.
 
@@ -655,7 +655,7 @@ Example addon (repo `plugins/wow/ATerminalControl/`, not loaded by the Mac app):
 
 ```
 ## Interface: 11507, 110007, 120000
-## Title: ATerminal Control
+## Title: Amil Control
 ## SavedVariables: ATControlDB
 ```
 
@@ -672,13 +672,13 @@ SlashCmdList["AT"] = function(msg)
     text = msg,
     submit = 1,
   })
-  print("|cffc4a574ATerminal|r queued #" .. ATControlDB.seq .. " — /reload to send")
+  print("|cffc4a574Amil|r queued #" .. ATControlDB.seq .. " — /reload to send")
 end
 ```
 
 Cap queue length at 32 in the addon. Plugin ignores ops outside the allow-list even if the bus would accept them (`fs` / `admin` stripped).
 
-**ToS.** Typing `/at` to send text to *your* terminal is not botting. Do not add combat automation, pixel reading, or input injection into the WoW client from ATerminal. Control is one-way: WoW → ATerminal, never ATerminal → WoW key events.
+**ToS.** Typing `/at` to send text to *your* terminal is not botting. Do not add combat automation, pixel reading, or input injection into the WoW client from Amil. Control is one-way: WoW → Amil, never Amil → WoW key events.
 
 ### AppKit wiring (no second state machine)
 
@@ -752,7 +752,7 @@ These are O(n) loops, n ≤ a few dozen. Nice-to-have in PR3, not a blocker (App
 
 - `ATTermView`: add `writeControlBytes:length:`, publish `insertPath:`, `writePNG:`, `noteSubmit`, `ptyReady`. Do **not** change `writeBytes:`.
 - `ATWindowController`: no protocol explosion. Vtable C functions live at the bottom of `App.m` next to `at_macos_main`. `ATControlIO` GCD glue lives there too, separate from the UI vtable.
-- Menu (optional, later PR): **ATerminal → Control Socket…** / **Pair Device…**. v1 uses `atctl pair` → `core.pair` over unix.
+- Menu (optional, later PR): **Amil → Control Socket…** / **Pair Device…**. v1 uses `atctl pair` → `core.pair` over unix.
 
 ### `atctl` (new executable)
 
@@ -769,7 +769,7 @@ atctl pair [--name iphone] [--caps read,focus,input,session,layout,fs]
 atctl pair --revoke <id>
 ```
 
-Talks ATR1 to `control.sock`. Exit 2 if the socket is missing (“ATerminal is not running”). **Does not write `pairing.json` itself** — the running app does, via `core.pair`, so there is no lost-update race with a live `at_control_start`. If the app is quit, `atctl pair` fails (no server). That matches “the app process is the server.”
+Talks ATR1 to `control.sock`. Exit 2 if the socket is missing (“Amil is not running”). **Does not write `pairing.json` itself** — the running app does, via `core.pair`, so there is no lost-update race with a live `at_control_start`. If the app is quit, `atctl pair` fails (no server). That matches “the app process is the server.”
 
 ### `build.zig` (Zig 0.16)
 
@@ -798,7 +798,7 @@ const atctl = b.addExecutable(.{ .name = "atctl", .root_module = atctl_mod });
 
 **`state.json` is unchanged.** Workspaces/tabs/layouts/history remain the store’s document. Control does not add keys there (avoids dirty-flag fights with the 2s autosave).
 
-New files under `~/Library/Application Support/ATerminal/` (all 0600, dirs 0700):
+New files under `~/Library/Application Support/Amil/` (all 0600, dirs 0700):
 
 | File | Purpose |
 | --- | --- |
@@ -938,7 +938,7 @@ Alerting: none in v1 (single-user desktop app).
 
 **Rollback:** delete `control.json` plugins array, set `"unix": false`, or export `ATERMINAL_CONTROL=0`. No `state.json` migration to reverse. Unlink `control.sock`. Binary rollback is a normal app replace; dylibs are not in the `.app`.
 
-**Size gate:** measure `ls -l zig-out/ATerminal.app/Contents/MacOS/aterminal` ReleaseFast arm64 vs `main` (Ghostty out of the denominator). Fail if:
+**Size gate:** measure `ls -l zig-out/Amil.app/Contents/MacOS/aterminal` ReleaseFast arm64 vs `main` (Ghostty out of the denominator). Fail if:
 
 - PR1+PR2 (bus + ATR1 + unix listen, no cmds snapshot) delta **> ~50KB**
 - PR3–PR5 (cmds + pairing + emit, still default binary) **cumulative** delta **> ~80KB**
@@ -967,7 +967,7 @@ Alerting: none in v1 (single-user desktop app).
 - PTY write / paste / activity: [`src/macos/TermView.m`](../src/macos/TermView.m), [`src/macos/TermView.h`](../src/macos/TermView.h) (`ATActivity`)
 - Agents: [`include/at_agents.h`](../include/at_agents.h)
 - Build: [`build.zig`](../build.zig)
-- Persistence dir: `~/Library/Application Support/ATerminal/` (`state.json`, `state.recovery.json`, `session.lock` — lock is **not** the unix-socket owner)
+- Persistence dir: `~/Library/Application Support/Amil/` (`state.json`, `state.recovery.json`, `session.lock` — lock is **not** the unix-socket owner)
 - Forever client: `/Applications/World of Warcraft/_classic_beta_/`
 - macOS peer cred: `getpeereid(3)`, `LOCAL_PEERPID` (`SOL_LOCAL`)
 - Tailscale Serve (tailnet-only, not Funnel): `tailscale serve --tcp`
@@ -984,7 +984,7 @@ Alerting: none in v1 (single-user desktop app).
 
 3. **Unix socket on-by-default; TCP/HTTP off.** One `dispatch_source` on the main queue, `getpeereid` same uid. *Rationale:* cheap enough (budget: ≪50KB, ~0 idle RAM); network bind is a privacy prompt and a threat.
 
-4. **Runtime dylibs, explicit `control.json` list, no directory auto-load.** Default `zig build` does not link HTTP/WoW/Tailscale and does not copy dylibs into `ATerminal.app`. Load with `std.c.dlopen(NOW|LOCAL)`, not `std.DynLib`. *Rationale:* “everything is a plugin”; keep the hot binary small; surprise `dlopen` is a backdoor. `-Dplugin-http` is a notarization escape hatch only.
+4. **Runtime dylibs, explicit `control.json` list, no directory auto-load.** Default `zig build` does not link HTTP/WoW/Tailscale and does not copy dylibs into `Amil.app`. Load with `std.c.dlopen(NOW|LOCAL)`, not `std.DynLib`. *Rationale:* “everything is a plugin”; keep the hot binary small; surprise `dlopen` is a backdoor. `-Dplugin-http` is a notarization escape hatch only.
 
 5. **ATR1 length-prefixed frames + JSON payload.** Not gRPC, not JSON on the render path. HTTP/JSON is an adapter for iOS/URLSession. **PNG is `args.png_b64`.** *Rationale:* WoW/Lua/iOS/CLI can all produce JSON; no v1 binary payload type. Scanner + per-message schema parsers, not a DOM.
 
@@ -992,7 +992,7 @@ Alerting: none in v1 (single-user desktop app).
 
 7. **Do not embed tsnet.** iOS reaches the Mac via Tailscale Serve in front of 127.0.0.1 or an optional bind to `100.x`. Pairing token still required. Funnel forbidden. *Rationale:* size/RAM; tailnet membership ≠ permission to type into Claude.
 
-8. **WoW Classic/Forever cannot HTTP; `at-wow` watches SavedVariables.** Live round-trip is not possible without `/reload`. Never ATerminal → WoW input. No `wow-out.lua` in v1. *Rationale:* sandbox is real; sidecars are invisible in-game.
+8. **WoW Classic/Forever cannot HTTP; `at-wow` watches SavedVariables.** Live round-trip is not possible without `/reload`. Never Amil → WoW input. No `wow-out.lua` in v1. *Rationale:* sandbox is real; sidecars are invisible in-game.
 
 9. **All bus dispatch on the AppKit main thread**, with the Unix source contract (O_NONBLOCK, no spin, cancel-then-close, 4KiB/fire, event drop). No dedicated I/O thread in v1. Direct call (no `dispatch_async` hop, no `dispatch_sync`). *Rationale:* `at_store_*` / `_terms` are not thread-safe; PTY already uses this pattern; a thread is a UAF footgun for 8 local clients.
 
@@ -1004,7 +1004,7 @@ Alerting: none in v1 (single-user desktop app).
 
 13. **Socket ownership is `connect()`-before-unlink, not `session.lock`.** `at_store_open` always overwrites the pid file; it is not exclusive. *Rationale:* a second app instance must not steal the first’s control socket.
 
-14. **Same-uid unix gets `PAIR`, never `ADMIN`.** `atctl pair` is `core.pair` over the socket (app writes `pairing.json`). Default token caps = `READ|FOCUS|INPUT|SESSION|LAYOUT|FS`; always mask off `PAIR`/`ADMIN` from the stored token. Do not special-case “peer executable is ATerminal” (`proc_pidpath` TOCTOU). *Rationale:* pairing is the local-admin operation we actually need; a token must not mint further tokens.
+14. **Same-uid unix gets `PAIR`, never `ADMIN`.** `atctl pair` is `core.pair` over the socket (app writes `pairing.json`). Default token caps = `READ|FOCUS|INPUT|SESSION|LAYOUT|FS`; always mask off `PAIR`/`ADMIN` from the stored token. Do not special-case “peer executable is Amil” (`proc_pidpath` TOCTOU). *Rationale:* pairing is the local-admin operation we actually need; a token must not mint further tokens.
 
 15. **Control Zig talks to the store only through the C ABI** (`extern fn at_store_*`). `store.zig` comptime-imports `control.zig` so exports link; the reverse import is a cycle. *Rationale:* keep `src/store.zig` as the exe root.
 
@@ -1032,7 +1032,7 @@ Incremental, each PR independently reviewable and mergeable. App remains usable 
 - **Dependencies:** PR 1
 - **Description:** Connect-before-unlink bind of `control/control.sock`. Accept ≤8. `O_NONBLOCK`, `FD_CLOEXEC`, `SO_NOSIGPIPE`, `SIG_IGN`, 4KiB/fire state machine, 60s pre-hello idle. After `watch_fd` succeeds, IO glue owns the fd: `unwatch_fd` only cancels; cancel handler `close`s; `unix.zig` must not `close`. Same-uid hello/`core.ping`. No workspace ops.
 
-  **Manual script (no automated GUI test):** quit existing `aterminal`; launch `zig-out/ATerminal.app`; `atctl ping`; **second `open -n` does not steal the socket**; `ATERMINAL_CONTROL=0` leaves no sock; `"unix": false` same; `lsof -p <agent-pid>` after spawning an agent tab does not list `control.sock`.
+  **Manual script (no automated GUI test):** quit existing `aterminal`; launch `zig-out/Amil.app`; `atctl ping`; **second `open -n` does not steal the socket**; `ATERMINAL_CONTROL=0` leaves no sock; `"unix": false` same; `lsof -p <agent-pid>` after spawning an agent tab does not list `control.sock`.
 
 ### PR 3 — UI vtable and read commands
 
@@ -1067,7 +1067,7 @@ Incremental, each PR independently reviewable and mergeable. App remains usable 
 - **Title:** `control: dylib plugin loader`
 - **Files:** `include/at_plugin.h`, `src/control.zig` (`std.c.dlopen` NOW|LOCAL, host thunks, `control.json` `plugins` stems), `build.zig` (`addLibrary` `.linkage = .dynamic` for a **stub** plugin used in tests).
 - **Dependencies:** PR 5
-- **Description:** Load/skip on failure. Pointer lifetime until shutdown. Test: stub plugin `call("pane.paste_path")` with wow-like mask → `denied`. Default app binary size **unchanged** vs PR 5 (loader is small; no http parser). No dylibs in `ATerminal.app`.
+- **Description:** Load/skip on failure. Pointer lifetime until shutdown. Test: stub plugin `call("pane.paste_path")` with wow-like mask → `denied`. Default app binary size **unchanged** vs PR 5 (loader is small; no http parser). No dylibs in `Amil.app`.
 
 ### PR 6b — HTTP loopback plugin
 
@@ -1079,7 +1079,7 @@ Incremental, each PR independently reviewable and mergeable. App remains usable 
 ### PR 7 — WoW SavedVariables plugin + example addon
 
 - **Title:** `plugins: at-wow SavedVariables queue`
-- **Files:** `src/plugins/wow.zig`, `plugins/wow/ATerminalControl/` (toc Interface documented unknown; README: no HTTP, `/reload` flush, one-way, no ATerminal→WoW input), `wow.cursor`, `control.json` `wow.client` / `wow.wtf`.
+- **Files:** `src/plugins/wow.zig`, `plugins/wow/ATerminalControl/` (toc Interface documented unknown; README: no HTTP, `/reload` flush, one-way, no Amil→WoW input), `wow.cursor`, `control.json` `wow.client` / `wow.wtf`.
 - **Dependencies:** PR 6a (proven loader). Not PR 6b.
 - **Description:** Lua table subset, monotonic ids, mask without `fs`/`admin`/`pair`. Chatlog unimplemented. No `wow-out.lua`. Inspect Forever WTF only with the client closed.
 
@@ -1090,4 +1090,4 @@ Incremental, each PR independently reviewable and mergeable. App remains usable 
 - **Dependencies:** PR 6b
 - **Description:** `getifaddrs` → bind Tailscale IPv4 only. Skip if Serve-in-front-of-6b is enough. Token-gated. No Funnel, no tsnet.
 
-Each PR: `zig build` of the app, `zig build test` for new Zig modules, binary size delta note. Manual `atctl` against `zig-out/ATerminal.app` (quit existing `aterminal` first; do not `pkill -f` the wrapper).
+Each PR: `zig build` of the app, `zig build test` for new Zig modules, binary size delta note. Manual `atctl` against `zig-out/Amil.app` (quit existing `aterminal` first; do not `pkill -f` the wrapper).
