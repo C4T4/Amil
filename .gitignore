@@ -1,0 +1,9 @@
+.zig-cache/
+zig-out/
+zig-pkg/
+tools/
+*.tar.xz
+.DS_Store
+*.swp
+.aterminal-paste/
+resources/AppIcon.iconset/

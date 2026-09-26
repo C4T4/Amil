@@ -1,0 +1,35 @@
+{
+  "fill" : {
+    "solid" : "extended-srgb:0.05500,0.05900,0.06300,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "extended-srgb:0.76900,0.64700,0.45500,1.00000"
+          },
+          "glass" : true,
+          "image-name" : "Mark.svg",
+          "name" : "Mark",
+          "position" : {
+            "scale" : 1.05,
+            "translation-in-points" : [ -18, 0 ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.35
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.4
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}
