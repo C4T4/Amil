@@ -1143,6 +1143,7 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
     ATHistoryView *_history;
     ATSettingsView *_settings;
     ATQueueView *_queue;
+    NSScrollView *_queueScroll;
     ATStatusView *_status;
     NSView *_stage;
     NSMutableDictionary<NSString *, ATTermView *> *_terms;
@@ -1243,6 +1244,15 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
     };
     _settings = [[ATSettingsView alloc] initWithFrame:NSZeroRect];
     _queue = [[ATQueueView alloc] initWithFrame:NSZeroRect];
+    /* Stage cards make this page taller than the window. It used to be
+       pinned edge to edge and simply clipped. */
+    _queueScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _queueScroll.drawsBackground = NO;
+    _queueScroll.hasVerticalScroller = YES;
+    _queueScroll.hasHorizontalScroller = NO;
+    _queueScroll.borderType = NSNoBorder;
+    _queueScroll.autohidesScrollers = YES;
+    _queueScroll.documentView = _queue;
     _status = [[ATStatusView alloc] initWithFrame:NSZeroRect];
     _stage = [[NSView alloc] initWithFrame:NSZeroRect];
     _stage.wantsLayer = YES;
@@ -1252,7 +1262,7 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
     _empty.translatesAutoresizingMaskIntoConstraints = NO;
     _history.translatesAutoresizingMaskIntoConstraints = NO;
     _settings.translatesAutoresizingMaskIntoConstraints = NO;
-    _queue.translatesAutoresizingMaskIntoConstraints = NO;
+    _queueScroll.translatesAutoresizingMaskIntoConstraints = NO;
     _status.translatesAutoresizingMaskIntoConstraints = NO;
     _stage.translatesAutoresizingMaskIntoConstraints = NO;
     [c addSubview:_tabs];
@@ -1262,8 +1272,8 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
     [c addSubview:_history];
     [c addSubview:_settings];
     _settings.hidden = YES;
-    [c addSubview:_queue];
-    _queue.hidden = YES;
+    [c addSubview:_queueScroll];
+    _queueScroll.hidden = YES;
     [c addSubview:_status];
     _sessionH = [_sessions.heightAnchor constraintEqualToConstant:0];
     [NSLayoutConstraint activateConstraints:@[
@@ -1295,10 +1305,10 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
         [_settings.leadingAnchor constraintEqualToAnchor:_stage.leadingAnchor],
         [_settings.trailingAnchor constraintEqualToAnchor:_stage.trailingAnchor],
         [_settings.bottomAnchor constraintEqualToAnchor:_stage.bottomAnchor],
-        [_queue.topAnchor constraintEqualToAnchor:_stage.topAnchor],
-        [_queue.leadingAnchor constraintEqualToAnchor:_stage.leadingAnchor],
-        [_queue.trailingAnchor constraintEqualToAnchor:_stage.trailingAnchor],
-        [_queue.bottomAnchor constraintEqualToAnchor:_stage.bottomAnchor],
+        [_queueScroll.topAnchor constraintEqualToAnchor:_stage.topAnchor],
+        [_queueScroll.leadingAnchor constraintEqualToAnchor:_stage.leadingAnchor],
+        [_queueScroll.trailingAnchor constraintEqualToAnchor:_stage.trailingAnchor],
+        [_queueScroll.bottomAnchor constraintEqualToAnchor:_stage.bottomAnchor],
     ]];
     [self syncQuickstartHome];
     [self reload];
@@ -2458,7 +2468,7 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _empty.hidden = NO;
         _history.hidden = YES;
         _settings.hidden = YES;
-        _queue.hidden = YES;
+        _queueScroll.hidden = YES;
         _status.hidden = NO;
         _stage.hidden = YES;
         self.window.title = @"Amil";
@@ -2477,7 +2487,7 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _empty.hidden = YES;
         _history.hidden = NO;
         _settings.hidden = YES;
-        _queue.hidden = YES;
+        _queueScroll.hidden = YES;
         _status.hidden = NO;
         _stage.hidden = YES;
         self.window.title = @"History";
@@ -2496,7 +2506,7 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _empty.hidden = YES;
         _history.hidden = YES;
         _settings.hidden = NO;
-        _queue.hidden = YES;
+        _queueScroll.hidden = YES;
         _status.hidden = NO;
         _stage.hidden = YES;
         self.window.title = @"Settings";
@@ -2515,7 +2525,7 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _empty.hidden = YES;
         _history.hidden = YES;
         _settings.hidden = YES;
-        _queue.hidden = NO;
+        _queueScroll.hidden = NO;
         _status.hidden = NO;
         _stage.hidden = YES;
         self.window.title = @"Pipeline";
@@ -2533,7 +2543,7 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     BOOL empty = i < 0;
     _history.hidden = YES;
     _settings.hidden = YES;
-    _queue.hidden = YES;
+    _queueScroll.hidden = YES;
     _empty.hidden = !empty;
     _status.hidden = empty;
     _stage.hidden = empty;
