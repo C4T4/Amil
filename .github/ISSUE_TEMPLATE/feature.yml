@@ -1,0 +1,17 @@
+name: Change
+description: A behavior you want Amil to have.
+title: ""
+labels: ["change"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is hard today
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should happen instead
+    validations:
+      required: true

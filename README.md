@@ -42,6 +42,10 @@ State lives in `~/Library/Application Support/ATerminal/` (`state.json`, `contro
 
 Claude, Grok, ChatGPT, and Gemini are the command-line tools Amil can launch. Those names belong to their owners. The marks in `resources/agents/` are original stand-ins, not their logos.
 
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request. CI on macOS runs `zig build` and `zig build test`. Report a security problem the way [SECURITY.md](SECURITY.md) describes, not in a public issue.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). Ghostty is MIT; see [vendor/ghostty/LICENSE](vendor/ghostty/LICENSE) after the submodule is checked out.

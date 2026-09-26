@@ -1,0 +1,30 @@
+name: Bug
+description: Something Amil does that it should not.
+title: ""
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Amil version
+      description: CFBundleShortVersionString, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: A screenshot helps for layout bugs. Do not paste secrets or session transcripts.
