@@ -1,4 +1,4 @@
-/* Tiny PTY holder. Survives ATerminal crashing: we keep the master fd
+/* Tiny PTY holder. Survives Amil crashing: we keep the master fd
    open and hand a duplicate to the UI over a unix socket (SCM_RIGHTS). */
 #include <errno.h>
 #include <fcntl.h>
@@ -63,6 +63,20 @@ static int listen_unix(const char *path) {
     return fd;
 }
 
+/* The UI kills us with SIGTERM when a pane goes away. Without a handler the
+   socket and pid file stay behind and the next reader sees a live-looking
+   helper that is gone. Only async-signal-safe calls here. */
+static char g_sock[512];
+static char g_pidfile[512];
+static volatile pid_t g_child = -1;
+
+static void on_term(int sig) {
+    if (g_child > 1) kill(g_child, SIGTERM);
+    if (g_sock[0]) unlink(g_sock);
+    if (g_pidfile[0]) unlink(g_pidfile);
+    _exit(128 + sig);
+}
+
 static void write_pid(const char *sock, pid_t pid) {
     char path[512];
     snprintf(path, sizeof(path), "%s.pid", sock);
@@ -115,6 +129,11 @@ int at_pty_main(int argc, char **argv) {
         return 1;
     }
     write_pid(sock, getpid());
+    g_child = child;
+    snprintf(g_sock, sizeof(g_sock), "%s", sock);
+    snprintf(g_pidfile, sizeof(g_pidfile), "%s.pid", sock);
+    signal(SIGTERM, on_term);
+    signal(SIGINT, on_term);
     for (;;) {
         int st = 0;
         pid_t w = waitpid(child, &st, WNOHANG);

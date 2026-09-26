@@ -33,7 +33,9 @@ typedef NS_ENUM(NSInteger, ATActivity) {
                      resume:(BOOL)resume;
 - (void)killChild;
 - (void)noteSeen;
-- (void)writeBytes:(const void *)bytes length:(size_t)n;
+/* NO when the pty is not up: the bytes went nowhere. Callers that speak for
+   someone else (the control plane) must report that, not swallow it. */
+- (BOOL)writeBytes:(const void *)bytes length:(size_t)n;
 - (uint64_t)childFootprint;
 @end
 

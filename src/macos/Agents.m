@@ -77,8 +77,10 @@ NSArray<NSString *> *ATAgentFlagsForCommand(NSString *command) {
         if ([command isEqualToString:@"grok"]) return @[ @"--always-approve" ];
         if ([command isEqualToString:@"claude"]) return @[ @"--dangerously-skip-permissions" ];
     } else if ([command isEqualToString:@"grok"]) {
-        /* Home config may still say always-approve. The toggle is the switch. */
-        return @[ @"--permission-mode", @"ask" ];
+        /* Home config may still say always-approve. The toggle is the switch.
+           "default" is grok's ask-me-first mode; "ask" is not a value it takes
+           and makes it exit 2 before the TUI ever comes up. */
+        return @[ @"--permission-mode", @"default" ];
     }
     for (uint32_t i = 0; i < at_agent_count(); i++) {
         const ATAgentInfo *a = at_agent_at(i);

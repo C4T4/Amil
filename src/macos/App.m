@@ -533,7 +533,7 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
     switch ((ATNavItem)(intptr_t)data) {
     case ATNavHome: return @"Quickstart";
     case ATNavHistory: return @"History";
-    case ATNavQueue: return @"Queue";
+    case ATNavQueue: return @"Pipeline";
     case ATNavSettings: return @"Settings";
     default: return nil;
     }
@@ -882,6 +882,8 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
 
 @interface ATStatusView : NSView
 @property (nonatomic, copy) NSString *line;
+@property (nonatomic, copy) NSString *jobLine;
+@property (nonatomic, assign) BOOL jobUrgent;
 @property (nonatomic, strong) NSImage *icon;
 @end
 @implementation ATStatusView
@@ -898,13 +900,29 @@ static NSRect ATDrawNavIcon(ATNavItem item, CGFloat x, CGFloat h, BOOL on, BOOL 
         [self.icon drawInRect:ir fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
         x = NSMaxX(ir) + 6;
     }
-    if (!self.line.length) return;
+    NSFont *font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular],
+        NSFontAttributeName: font,
         NSForegroundColorAttributeName: ATMuted(),
     };
+    CGFloat jobW = 0;
+    if (self.jobLine.length) {
+        NSDictionary *ja = @{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: self.jobUrgent ? ATAccent() : ATMuted(),
+        };
+        NSSize jz = [self.jobLine sizeWithAttributes:ja];
+        jobW = jz.width + 16;
+        [self.jobLine drawAtPoint:NSMakePoint(self.bounds.size.width - 10 - jz.width,
+                                              (self.bounds.size.height - jz.height) / 2.0)
+                   withAttributes:ja];
+    }
+    if (!self.line.length) return;
     NSSize sz = [self.line sizeWithAttributes:attrs];
-    [self.line drawAtPoint:NSMakePoint(x, (self.bounds.size.height - sz.height) / 2.0) withAttributes:attrs];
+    CGFloat maxW = self.bounds.size.width - x - jobW - 8;
+    if (maxW < 40) return;
+    [self.line drawInRect:NSMakeRect(x, (self.bounds.size.height - sz.height) / 2.0, maxW, sz.height)
+           withAttributes:attrs];
 }
 @end
 
@@ -1383,6 +1401,45 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     [_tabs setNeedsDisplay:YES];
 }
 
+- (NSString *)workflowHintForPane:(NSString *)paneId urgent:(BOOL *)urgent {
+    if (urgent) *urgent = NO;
+    if (!paneId.length) return nil;
+    NSString *root = [NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/Application Support/ATerminal/queue"];
+    NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:root error:nil];
+    for (NSString *name in names) {
+        if ([name hasPrefix:@"."]) continue;
+        NSString *path = [[root stringByAppendingPathComponent:name] stringByAppendingPathComponent:@"job.json"];
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (!data) continue;
+        id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![obj isKindOfClass:[NSDictionary class]]) continue;
+        NSString *st = [obj[@"status"] isKindOfClass:[NSString class]] ? obj[@"status"] : @"";
+        if ([st isEqualToString:@"done"] || [st isEqualToString:@"error"]) continue;
+        NSString *pane = [obj[@"pane"] isKindOfClass:[NSString class]] ? obj[@"pane"] : @"";
+        NSString *tab = [obj[@"tab"] isKindOfClass:[NSString class]] ? obj[@"tab"] : @"";
+        if (![pane isEqualToString:paneId] && ![tab isEqualToString:paneId]) continue;
+        NSArray *steps = [obj[@"steps"] isKindOfClass:[NSArray class]] ? obj[@"steps"] : @[];
+        NSInteger si = 0;
+        if ([obj[@"step"] isKindOfClass:[NSNumber class]]) si = [obj[@"step"] integerValue];
+        else if ([obj[@"step"] isKindOfClass:[NSString class]]) si = [obj[@"step"] integerValue];
+        NSString *stepName = @"step";
+        if (si >= 0 && (NSUInteger)si < steps.count && [steps[(NSUInteger)si] isKindOfClass:[NSDictionary class]]) {
+            id n = steps[(NSUInteger)si][@"name"];
+            if ([n isKindOfClass:[NSString class]] && [n length]) stepName = n;
+        }
+        BOOL you = [st isEqualToString:@"needs_you"] || [st isEqualToString:@"human"];
+        if (urgent) *urgent = you;
+        NSString *where = steps.count
+            ? [NSString stringWithFormat:@"step %ld of %lu · %@", (long)si + 1, (unsigned long)steps.count, stepName]
+            : stepName;
+        if ([st isEqualToString:@"needs_you"]) return [@"needs you  ·  " stringByAppendingString:where];
+        if ([st isEqualToString:@"human"]) return [@"your turn  ·  " stringByAppendingString:where];
+        return where;
+    }
+    return nil;
+}
+
 - (void)refreshRam {
     if (_page != ATPageWorkspace || !_statusBase.length) return;
     ATTermView *tv = _visibleTerm;
@@ -1396,8 +1453,18 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     uint64_t bytes = tv ? [tv childFootprint] : 0;
     if (bytes > 0) [parts addObject:ATFormatRAM(bytes)];
     NSString *line = [parts componentsJoinedByString:@"  ·  "];
-    if ([_status.line isEqualToString:line]) return;
+    NSString *job = nil;
+    BOOL urgent = NO;
+    NSString *tab = tv.paneId;
+    if (tab.length) job = [self workflowHintForPane:tab urgent:&urgent];
+    BOOL same = [_status.line isEqualToString:line]
+        && ((_status.jobLine ?: @"").length == (job ?: @"").length)
+        && [_status.jobLine ?: @"" isEqualToString:job ?: @""]
+        && _status.jobUrgent == urgent;
+    if (same) return;
     _status.line = line;
+    _status.jobLine = job;
+    _status.jobUrgent = urgent;
     [_status setNeedsDisplay:YES];
     if (!_sessions.hidden) [_sessions setNeedsDisplay:YES];
 }
@@ -2399,6 +2466,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _status.icon = nil;
         _statusBase = home.length ? [NSString stringWithFormat:@"%@  ·  pick an agent", home] : @"pick an agent";
         _status.line = _statusBase;
+        _status.jobLine = nil;
+        _status.jobUrgent = NO;
         _visibleTerm = nil;
         [_status setNeedsDisplay:YES];
         [self.window makeFirstResponder:_empty];
@@ -2415,6 +2484,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _status.icon = nil;
         _statusBase = @"past sessions";
         _status.line = _statusBase;
+        _status.jobLine = nil;
+        _status.jobUrgent = NO;
         _visibleTerm = nil;
         [_status setNeedsDisplay:YES];
         [_history reload];
@@ -2432,6 +2503,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _status.icon = nil;
         _statusBase = @"extensions";
         _status.line = _statusBase;
+        _status.jobLine = nil;
+        _status.jobUrgent = NO;
         _visibleTerm = nil;
         [_status setNeedsDisplay:YES];
         [_settings reload];
@@ -2445,10 +2518,12 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _queue.hidden = NO;
         _status.hidden = NO;
         _stage.hidden = YES;
-        self.window.title = @"Queue";
+        self.window.title = @"Pipeline";
         _status.icon = nil;
-        _statusBase = @"pipeline";
+        _statusBase = @"workflows and runs";
         _status.line = _statusBase;
+        _status.jobLine = nil;
+        _status.jobUrgent = NO;
         _visibleTerm = nil;
         [_status setNeedsDisplay:YES];
         [_queue reload];
@@ -2472,6 +2547,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         _empty.hidden = NO;
         self.window.title = @"Amil";
         _status.line = @"";
+        _status.jobLine = nil;
+        _status.jobUrgent = NO;
         _statusBase = @"";
         _visibleTerm = nil;
         _status.icon = nil;
@@ -2601,10 +2678,13 @@ static int ATUiPaneWrite(void *ctx, const char *pane, const void *bytes, size_t 
     if (!pane) return -1;
     ATTermView *tv = [wc termForPane:@(pane)];
     if (!tv) return -1;
-    if (n > 0 && bytes) [tv writeBytes:bytes length:n];
+    /* A pane whose pty is not up yet drops everything written to it. Saying
+       "sent" here is what let the pipeline believe it had prompted an agent
+       that never heard a word. */
+    if (n > 0 && bytes && ![tv writeBytes:bytes length:n]) return -1;
     if (submit) {
         const char cr = '\r';
-        [tv writeBytes:&cr length:1];
+        if (![tv writeBytes:&cr length:1]) return -1;
     }
     return 0;
 }
@@ -2793,7 +2873,7 @@ static int ATIoUnwatch(void *ctx, int fd) {
     [app addItemWithTitle:@"About Amil" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:@"Settings…" action:@selector(menuSettings:) keyEquivalent:@","];
-    [app addItemWithTitle:@"Queue" action:@selector(menuQueue:) keyEquivalent:@""];
+    [app addItemWithTitle:@"Pipeline" action:@selector(menuQueue:) keyEquivalent:@""];
     [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:@"Quit Amil" action:@selector(terminate:) keyEquivalent:@"q"];
 

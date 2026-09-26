@@ -159,7 +159,7 @@ static NSSet<NSString *> *ATLiveGrokSessions(void) {
     return live;
 }
 
-/* Another grok (Grok Bot, a leftover PTY, a previous aterminal) may already
+/* Another grok (Grok Bot, a leftover PTY, a previous amil) may already
    hold this session. A second --resume then paints a stale snapshot. */
 static void ATStopPid(pid_t pid) {
     if (pid <= 1) return;
@@ -308,6 +308,7 @@ BOOL ATSessionExists(NSString *command, NSString *cwd, NSString *sessionId) {
 - (void)spawn;
 - (void)spawnIfReady;
 - (void)ioctlWinsize;
+- (void)nudgeRepaint;
 - (void)beginFirstFrameHold;
 - (void)flushFirstFrame;
 - (void)signalKidsWinch;
@@ -371,6 +372,7 @@ static const NSTimeInterval kATTurnFloor = 3.0;
     NSTimer *_holdTimer;
     NSMutableData *_holdBuf;
     BOOL _holdUntilFirstFrame;
+    BOOL _childDied;
 }
 
 static void at_write_pty(GhosttyTerminal terminal, void *userdata,
@@ -471,8 +473,18 @@ static bool at_device_attributes(GhosttyTerminal terminal, void *userdata,
 - (void)killChild {
     [_holdTimer invalidate];
     _holdTimer = nil;
+    /* The child can die inside the first-frame hold — a bad flag, a missing
+       binary, a crash on startup. Its last words are sitting in _holdBuf, and
+       dropping them here is what leaves the pane on "starting <agent>…" with
+       no reason on screen. Draw them instead. */
+    if (_holdUntilFirstFrame && _holdBuf.length && _term) {
+        ghostty_terminal_vt_write(_term, _holdBuf.bytes, _holdBuf.length);
+        _got_output = YES;
+    }
     _holdUntilFirstFrame = NO;
     _holdBuf = nil;
+    if (_pid > 0 || _master >= 0) _childDied = YES;
+    [self setNeedsDisplay:YES];
     if (_src) {
         dispatch_source_cancel(_src);
         _src = nil;
@@ -632,15 +644,39 @@ static uint64_t at_pid_footprint(pid_t pid) {
     [self setNeedsDisplay:YES];
 }
 
-- (void)ioctlWinsize {
+- (void)ioctlWinsizeRows:(uint16_t)rows {
     if (_master < 0) return;
     struct winsize ws = {
         .ws_col = _cols,
-        .ws_row = _rows,
+        .ws_row = rows,
         .ws_xpixel = (unsigned short)(_cols * _cw),
-        .ws_ypixel = (unsigned short)(_rows * _ch),
+        .ws_ypixel = (unsigned short)(rows * _ch),
     };
     ioctl(_master, TIOCSWINSZ, &ws);
+}
+
+- (void)ioctlWinsize {
+    [self ioctlWinsizeRows:_rows];
+}
+
+/* Re-attaching to a live pty gives us an empty grid in front of a TUI that
+   believes the old screen is still there. SIGWINCH on its own is ignored when
+   the size did not change, so change it for a moment and put it back: the TUI
+   then redraws everything, input line included. */
+- (void)nudgeRepaint {
+    if (_master < 0 || _rows < 5) return;
+    [self ioctlWinsizeRows:(uint16_t)(_rows - 1)];
+    [self signalKidsWinch];
+    _quietUntil = NSDate.timeIntervalSinceReferenceDate + kATRedrawGrace;
+    __weak ATTermView *weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ATTermView *ss = weak;
+        if (!ss || ss->_master < 0) return;
+        [ss ioctlWinsize];
+        [ss signalKidsWinch];
+        ss->_quietUntil = NSDate.timeIntervalSinceReferenceDate + kATRedrawGrace;
+    });
 }
 
 - (void)signalKidsWinch {
@@ -785,6 +821,7 @@ static uint64_t at_pid_footprint(pid_t pid) {
 }
 
 - (void)spawn {
+    _childDied = NO;
     [self resizeGrid];
     if (ghostty_terminal_new(NULL, &_term, _cols, _rows) != GHOSTTY_SUCCESS) {
         _term = NULL;
@@ -891,7 +928,7 @@ static uint64_t at_pid_footprint(pid_t pid) {
         for (NSUInteger i = 0; i < folders.count; i++) free(folder_cs[i]);
         free(folder_cs);
         [self armPty];
-        [self signalKidsWinch];
+        [self nudgeRepaint];
         return;
     }
     if (useBg && argv && [self launchBackgroundHelperArgv:argv cwd:cwd_c path:path_c] &&
@@ -943,7 +980,7 @@ static uint64_t at_pid_footprint(pid_t pid) {
         if (argv) {
             if (exe_c) execv(exe_c, argv);
             else if (cmd_c) execvp(cmd_c, argv);
-            dprintf(STDERR_FILENO, "aterminal: %s: %s\n",
+            dprintf(STDERR_FILENO, "amil: %s: %s\n",
                     exe_c ? exe_c : cmd_c, strerror(errno));
         } else {
             const char *shell = getenv("SHELL");
@@ -1205,6 +1242,14 @@ static BOOL ATViewportAsksInput(GhosttyTerminal term, uint16_t cols, uint16_t ro
     return YES;
 }
 
+/* What to say when the grid is still empty. A pane that died before its first
+   frame and said nothing must not keep claiming it is starting. */
+- (NSString *)startupLine {
+    NSString *name = self.command.length ? self.command : @"shell";
+    if (_childDied) return [NSString stringWithFormat:@"%@ exited before it printed anything", name];
+    return [NSString stringWithFormat:@"starting %@…", name];
+}
+
 static GhosttyColorRgb ATStyleRgb(GhosttyStyleColor c, const GhosttyColorRgb *pal, GhosttyColorRgb fb) {
     if (c.tag == GHOSTTY_STYLE_COLOR_RGB) return c.value.rgb;
     if (c.tag == GHOSTTY_STYLE_COLOR_PALETTE) return pal[c.value.palette];
@@ -1226,13 +1271,11 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
         [ATNSRgb(defBg) setFill];
         NSRectFill(self.bounds);
         if (!_got_output) {
-            NSString *name = self.command.length ? self.command : @"shell";
-            NSString *msg = [NSString stringWithFormat:@"starting %@…", name];
             NSDictionary *wait = @{
                 NSFontAttributeName: plain,
                 NSForegroundColorAttributeName: ATColorMuted(),
             };
-            [msg drawAtPoint:NSMakePoint(x0, y0) withAttributes:wait];
+            [[self startupLine] drawAtPoint:NSMakePoint(x0, y0) withAttributes:wait];
         }
         return;
     }
@@ -1243,13 +1286,11 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     [ATNSRgb(defBg) setFill];
     NSRectFill(self.bounds);
     if (!_got_output) {
-        NSString *name = self.command.length ? self.command : @"shell";
-        NSString *msg = [NSString stringWithFormat:@"starting %@…", name];
         NSDictionary *wait = @{
             NSFontAttributeName: plain,
             NSForegroundColorAttributeName: ATColorMuted(),
         };
-        [msg drawAtPoint:NSMakePoint(x0, y0) withAttributes:wait];
+        [[self startupLine] drawAtPoint:NSMakePoint(x0, y0) withAttributes:wait];
         return;
     }
     uint16_t cols = 0, rows = 0;
@@ -1382,8 +1423,9 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     return [super resignFirstResponder];
 }
 
-- (void)writeBytes:(const void *)p length:(size_t)n {
-    if (_master < 0 || n == 0) return;
+- (BOOL)writeBytes:(const void *)p length:(size_t)n {
+    if (_master < 0) return NO;
+    if (n == 0) return YES;
     const uint8_t *b = p;
     size_t off = 0;
     while (off < n) {
@@ -1394,6 +1436,7 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
         }
         off += (size_t)w;
     }
+    return off == n;
 }
 
 - (void)keyDown:(NSEvent *)event {
