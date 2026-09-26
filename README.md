@@ -9,7 +9,7 @@ The on-disk name is still `ATerminal` so existing sessions keep working. The app
 macOS 13 or newer. [Zig 0.16.0](https://ziglang.org/download/).
 
 ```sh
-git clone --recurse-submodules <this-repo>
+git clone --recurse-submodules https://github.com/C4T4/Amil.git
 cd Amil
 zig build
 open zig-out/ATerminal.app

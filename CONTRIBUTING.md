@@ -9,7 +9,7 @@ Amil is a macOS app. Changes are reviewed as pull requests against `main`. One p
 - Xcode command-line tools (`clang` is used for the AppKit side)
 
 ```sh
-git clone --recurse-submodules <this-repo>
+git clone --recurse-submodules https://github.com/C4T4/Amil.git
 cd Amil
 git submodule update --init vendor/ghostty
 zig build
