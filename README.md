@@ -1,10 +1,23 @@
 # Amil
 
-Amil is a small macOS terminal for working with coding agents. It is not an editor. One window holds workspaces, tabs, and panes. Each pane is a real PTY.
+Amil is a macOS terminal for the real agent CLIs. Claude, Grok, Codex, and Gemini run in the pane. Amil does not wrap a model, hold a key, or rewrite a prompt.
+
+One AppKit process owns the window and the terminal. There is no login daemon, no React shell, and no second process painting the screen. [ply](https://github.com/0xR32/ply) does this job with a Bun UI, a LaunchAgent, and three local sockets, and it only launches Claude and Codex, four panes at most. Amil is the same idea without that machinery, and with the rest of the workbench: workspaces, splits, a Dock badge when an agent needs you, and workflows whose steps you define.
 
 The on-disk name is still `ATerminal` so existing sessions keep working. The app you see is Amil.
 
-The pictures below are examples. The project, path, and transcript are made up.
+| | ply | Amil |
+| --- | --- | --- |
+| Process | React app + `plyd` LaunchAgent | one app |
+| Terminal | daemon decodes the screen, UI draws text runs | Ghostty VT in the window |
+| Agents | `claude`, `codex` | `claude`, `grok`, `codex`, `gemini` |
+| Layout | tabs, up to four panes | workspaces, tabs, splits |
+| When the window closes | daemon keeps the ptys | optional Background helper, not a login item |
+| Needs you | hook status | the screen itself, including the Dock |
+| Multi-step jobs | no | a workflow is a list of steps you edit |
+| To build | Rust, Zig, Bun, just | Zig 0.16 |
+
+The pictures below are examples. The project, path, and transcript are made up. They are not a recording of anyone’s machine.
 
 ![A session in a sample workspace](docs/screenshots/session.png)
 
