@@ -4,6 +4,14 @@ Amil is a small macOS terminal for working with coding agents. It is not an edit
 
 The on-disk name is still `ATerminal` so existing sessions keep working. The app you see is Amil.
 
+The pictures below are examples. The project, path, and transcript are made up.
+
+![A session in a sample workspace](docs/screenshots/session.png)
+
+![Settings, with Yolo off](docs/screenshots/settings.png)
+
+![A workflow with its own steps](docs/screenshots/queue.png)
+
 ## Build
 
 macOS 13 or newer. [Zig 0.16.0](https://ziglang.org/download/).
