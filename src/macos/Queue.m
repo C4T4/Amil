@@ -8,15 +8,12 @@
 
 static const CGFloat kPad = 36;
 static const CGFloat kRowH = 56;
-static const CGFloat kBranchH = 40;
-static const CGFloat kStageHeadH = 34;
+static const CGFloat kModelH = 40;
+static const CGFloat kStepGap = 8;
 static const CGFloat kAddRowH = 26;
-static const CGFloat kStageGap = 10;
-static const CGFloat kChipH = 26;
-/* Right-hand controls of a branch row, measured in from the right edge. */
+static const CGFloat kChipH = 28;
+/* Right-hand controls of a model line, measured in from the right edge. */
 static const CGFloat kStepCtlW = 314;
-/* Branches are indented so the parallel rail has somewhere to live. */
-static const CGFloat kBranchIndent = 22;
 
 static BOOL ATPipelineReady(void) {
     uint32_t n = at_control_ext_count();
@@ -49,23 +46,18 @@ static NSString *ATSupport(NSString *leaf) {
 }
 
 typedef NS_ENUM(NSInteger, ATQHit) {
-    ATQHitWorkflow = 1,
+    ATQHitWorkflowMenu = 1,
     ATQHitWorkflowNew,
-    ATQHitWorkflowDel,
     ATQHitFlowName,
     ATQHitStepName,
-    ATQHitStepAgent,
-    ATQHitStepKind,
-    ATQHitStepRemove,
     ATQHitStepUp,
     ATQHitStepDown,
-    ATQHitBranchAdd,
-    ATQHitStageName,
-    ATQHitStageUp,
-    ATQHitStageDown,
-    ATQHitStageRemove,
-    ATQHitStageFold,
-    ATQHitStageAdd,
+    ATQHitStepRemove,
+    ATQHitStepAdd,
+    ATQHitModelAgent,
+    ATQHitModelKind,
+    ATQHitModelAdd,
+    ATQHitModelRemove,
     ATQHitRun,
     ATQHitNewTab,
     ATQHitApprove,
@@ -73,76 +65,61 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     ATQHitOpen,
 };
 
-@interface ATQBranch : NSObject
-@property (nonatomic, copy) NSString *name;
+/* Who does a step. A step with more than one of these runs them at the
+   same time; models have no names of their own, the step has the name. */
+@interface ATQModel : NSObject
 @property (nonatomic, copy) NSString *kind;
 @property (nonatomic, copy) NSString *agent;
 @end
-@implementation ATQBranch
+@implementation ATQModel
 - (NSDictionary *)json {
-    return @{
-        @"name": self.name ?: @"do",
-        @"kind": self.kind ?: @"agent",
-        @"agent": self.agent ?: @"grok",
-    };
+    return @{ @"kind": self.kind ?: @"agent", @"agent": self.agent ?: @"grok" };
 }
 + (instancetype)from:(NSDictionary *)d {
-    ATQBranch *b = [ATQBranch new];
-    b.name = ([d[@"name"] isKindOfClass:[NSString class]] && [d[@"name"] length]) ? d[@"name"] : @"do";
+    ATQModel *m = [ATQModel new];
     NSString *kind = d[@"kind"];
-    b.kind = ([kind isKindOfClass:[NSString class]] && [kind isEqualToString:@"human"]) ? @"human" : @"agent";
-    b.agent = ([d[@"agent"] isKindOfClass:[NSString class]] && [d[@"agent"] length]) ? d[@"agent"] : @"grok";
-    return b;
+    m.kind = ([kind isKindOfClass:[NSString class]] && [kind isEqualToString:@"human"]) ? @"human" : @"agent";
+    m.agent = ([d[@"agent"] isKindOfClass:[NSString class]] && [d[@"agent"] length]) ? d[@"agent"] : @"grok";
+    return m;
 }
-+ (instancetype)named:(NSString *)name {
-    ATQBranch *b = [ATQBranch new];
-    b.name = name;
-    b.kind = @"agent";
-    b.agent = @"grok";
-    return b;
++ (instancetype)agent:(NSString *)agent {
+    ATQModel *m = [ATQModel new];
+    m.kind = @"agent";
+    m.agent = agent ?: @"grok";
+    return m;
 }
 @end
 
-/* One stage, holding the branches that run at the same time. Sequential and
-   parallel are not a switch: one branch is sequential, several are not. */
-@interface ATQStage : NSObject
+@interface ATQStep : NSObject
 @property (nonatomic, copy) NSString *name;
-@property (nonatomic, strong) NSMutableArray<ATQBranch *> *branches;
-@property (nonatomic, assign) BOOL collapsed;
+@property (nonatomic, strong) NSMutableArray<ATQModel *> *models;
 @end
-@implementation ATQStage
+@implementation ATQStep
 - (NSDictionary *)json {
-    NSMutableArray *bs = [NSMutableArray new];
-    for (ATQBranch *b in self.branches) [bs addObject:[b json]];
-    return @{ @"name": self.name ?: @"stage", @"branches": bs,
-              @"collapsed": @(self.collapsed) };
+    NSMutableArray *ms = [NSMutableArray new];
+    for (ATQModel *m in self.models) [ms addObject:[m json]];
+    return @{ @"name": self.name ?: @"do", @"models": ms };
 }
 + (instancetype)from:(NSDictionary *)d {
-    ATQStage *st = [ATQStage new];
-    st.name = ([d[@"name"] isKindOfClass:[NSString class]] && [d[@"name"] length]) ? d[@"name"] : @"stage";
-    st.collapsed = [d[@"collapsed"] isKindOfClass:[NSNumber class]] && [d[@"collapsed"] boolValue];
-    st.branches = [NSMutableArray new];
-    id arr = d[@"branches"];
+    ATQStep *st = [ATQStep new];
+    st.name = ([d[@"name"] isKindOfClass:[NSString class]] && [d[@"name"] length]) ? d[@"name"] : @"do";
+    st.models = [NSMutableArray new];
+    id arr = d[@"models"];
     if ([arr isKindOfClass:[NSArray class]]) {
         for (id x in arr) {
-            if ([x isKindOfClass:[NSDictionary class]]) [st.branches addObject:[ATQBranch from:x]];
+            if ([x isKindOfClass:[NSDictionary class]]) [st.models addObject:[ATQModel from:x]];
         }
+    } else {
+        /* v1: the step carried one kind and one agent itself. */
+        [st.models addObject:[ATQModel from:d]];
     }
-    if (!st.branches.count) [st.branches addObject:[ATQBranch named:@"do"]];
+    if (!st.models.count) [st.models addObject:[ATQModel agent:@"grok"]];
     return st;
 }
 + (instancetype)named:(NSString *)name {
-    ATQStage *st = [ATQStage new];
+    ATQStep *st = [ATQStep new];
     st.name = name;
-    st.branches = [NSMutableArray arrayWithObject:[ATQBranch named:name]];
-    return st;
-}
-/* A v1 step is a stage with one branch. */
-+ (instancetype)fromStep:(NSDictionary *)d {
-    ATQBranch *b = [ATQBranch from:d];
-    ATQStage *st = [ATQStage new];
-    st.name = b.name;
-    st.branches = [NSMutableArray arrayWithObject:b];
+    st.models = [NSMutableArray arrayWithObject:[ATQModel agent:@"grok"]];
     return st;
 }
 @end
@@ -150,63 +127,68 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 @interface ATQFlow : NSObject
 @property (nonatomic, copy) NSString *fid;
 @property (nonatomic, copy) NSString *name;
-@property (nonatomic, strong) NSMutableArray<ATQStage *> *stages;
+@property (nonatomic, strong) NSMutableArray<ATQStep *> *steps;
 @end
 @implementation ATQFlow
 - (NSDictionary *)json {
     NSMutableArray *st = [NSMutableArray new];
-    for (ATQStage *s in self.stages) [st addObject:[s json]];
+    for (ATQStep *s in self.steps) [st addObject:[s json]];
     return @{ @"id": self.fid ?: @"", @"name": self.name ?: @"Untitled",
-              @"version": @2, @"stages": st };
+              @"version": @2, @"steps": st };
 }
 + (instancetype)from:(NSDictionary *)d pathId:(NSString *)pathId {
     ATQFlow *f = [ATQFlow new];
     f.fid = ([d[@"id"] isKindOfClass:[NSString class]] && [d[@"id"] length]) ? d[@"id"] : pathId;
     f.name = ([d[@"name"] isKindOfClass:[NSString class]] && [d[@"name"] length]) ? d[@"name"] : @"Untitled";
-    f.stages = [NSMutableArray new];
-    id stages = d[@"stages"];
-    if ([stages isKindOfClass:[NSArray class]]) {
-        for (id x in stages) {
-            if ([x isKindOfClass:[NSDictionary class]]) [f.stages addObject:[ATQStage from:x]];
+    f.steps = [NSMutableArray new];
+    id steps = d[@"steps"];
+    if ([steps isKindOfClass:[NSArray class]]) {
+        for (id x in steps) {
+            if ([x isKindOfClass:[NSDictionary class]]) [f.steps addObject:[ATQStep from:x]];
         }
-    } else {
-        /* v1 on disk: a flat step list. Read it as one stage per step and
-           leave the file alone until the workflow is edited. */
-        id steps = d[@"steps"];
-        if ([steps isKindOfClass:[NSArray class]]) {
-            for (id x in steps) {
-                if ([x isKindOfClass:[NSDictionary class]]) [f.stages addObject:[ATQStage fromStep:x]];
+    } else if ([d[@"stages"] isKindOfClass:[NSArray class]]) {
+        /* Short-lived shape that called a step a stage and a model a branch:
+           one stage is one step, its branches are that step's models. */
+        for (id x in d[@"stages"]) {
+            if (![x isKindOfClass:[NSDictionary class]]) continue;
+            ATQStep *st = [ATQStep new];
+            st.name = ([x[@"name"] isKindOfClass:[NSString class]] && [x[@"name"] length])
+                ? x[@"name"] : @"do";
+            st.models = [NSMutableArray new];
+            if ([x[@"branches"] isKindOfClass:[NSArray class]]) {
+                for (id b in x[@"branches"]) {
+                    if ([b isKindOfClass:[NSDictionary class]]) [st.models addObject:[ATQModel from:b]];
+                }
             }
+            if (!st.models.count) [st.models addObject:[ATQModel agent:@"grok"]];
+            [f.steps addObject:st];
         }
     }
-    if (!f.stages.count) [f.stages addObject:[ATQStage named:@"do"]];
+    if (!f.steps.count) [f.steps addObject:[ATQStep named:@"do"]];
     return f;
 }
-+ (instancetype)blank {
++ (instancetype)blankNumbered:(NSUInteger)n {
     ATQFlow *f = [ATQFlow new];
     f.fid = [[NSUUID UUID] UUIDString];
-    f.name = @"Untitled";
-    f.stages = [NSMutableArray arrayWithObject:[ATQStage named:@"do"]];
+    f.name = n <= 1 ? @"Workflow" : [NSString stringWithFormat:@"Workflow %lu", (unsigned long)n];
+    f.steps = [NSMutableArray arrayWithObject:[ATQStep named:@"do"]];
     return f;
 }
-/* Until branches run in parallel, a run is still a flat list of steps:
-   every branch of every stage, in order. */
+/* A run is still one model at a time: every model of every step, in order. */
 - (NSArray *)stepsJson {
     NSMutableArray *out = [NSMutableArray new];
-    for (ATQStage *s in self.stages) {
-        for (ATQBranch *b in s.branches) [out addObject:[b json]];
+    for (ATQStep *s in self.steps) {
+        for (ATQModel *m in s.models) {
+            [out addObject:@{ @"name": s.name ?: @"do",
+                              @"kind": m.kind ?: @"agent",
+                              @"agent": m.agent ?: @"grok" }];
+        }
     }
     return out;
 }
-- (ATQBranch *)firstBranch {
-    for (ATQStage *s in self.stages) {
-        if (s.branches.count) return s.branches[0];
-    }
-    return nil;
-}
-- (NSUInteger)branchCount {
+- (NSUInteger)modelCount {
     NSUInteger n = 0;
-    for (ATQStage *s in self.stages) n += s.branches.count;
+    for (ATQStep *s in self.steps) n += s.models.count;
     return n;
 }
 @end
@@ -226,6 +208,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     void (^_editCommit)(NSString *);
     BOOL _editing;
     BOOL _newTabOn;
+    NSRect _nameRect;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
@@ -306,28 +289,25 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 }
 
 - (CGFloat)stepsTop {
-    NSUInteger rows = [self chipRowsForWidth:NSWidth(self.bounds)];
-    return 28 + 22 + 18 + rows * (kChipH + 6) - 6 + 16 + 22;
+    return 28 + 22 + kChipH + 20 + 22;
 }
 
-- (CGFloat)heightOfStage:(ATQStage *)st {
-    if (st.collapsed) return kStageHeadH;
-    return kStageHeadH + st.branches.count * kBranchH + kAddRowH;
+- (CGFloat)heightOfStep:(ATQStep *)st {
+    return st.models.count * kModelH;
 }
 
-- (CGFloat)stagesHeight {
+- (CGFloat)stepsHeight {
     CGFloat h = 0;
-    for (ATQStage *st in _flow.stages) h += [self heightOfStage:st] + kStageGap;
+    for (ATQStep *st in _flow.steps) h += [self heightOfStep:st] + kStepGap;
     return h;
 }
 
-/* "+ stage" sits under the last card; the run bar under a rule below it. */
-- (CGFloat)addStageTop {
-    return [self stepsTop] + [self stagesHeight];
+- (CGFloat)addStepTop {
+    return [self stepsTop] + [self stepsHeight];
 }
 
 - (CGFloat)taskTop {
-    return [self addStageTop] + kAddRowH + 26;
+    return [self addStepTop] + kAddRowH + 26;
 }
 
 - (CGFloat)contentHeight {
@@ -335,22 +315,6 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     if (ATPipelineBlocked()) y += 24;
     y += MAX(_jobs.count, 1) * (kRowH + 8);
     return y + 40;
-}
-
-- (void)layout {
-    [super layout];
-    /* Document view of a scroll view: own the height, follow the clip width. */
-    NSClipView *clip = self.enclosingScrollView.contentView;
-    if (clip) {
-        CGFloat cw = NSWidth(clip.bounds);
-        CGFloat ch = MAX(NSHeight(clip.bounds), [self contentHeight]);
-        if (fabs(NSWidth(self.frame) - cw) > 0.5 || fabs(NSHeight(self.frame) - ch) > 0.5) {
-            self.frame = NSMakeRect(0, 0, cw, ch);
-            [self setNeedsDisplay:YES];
-        }
-    }
-    CGFloat w = NSWidth(self.bounds);
-    _field.frame = NSMakeRect(kPad + 1, [self taskTop] + 1, w - kPad * 2 - 200, 30);
 }
 
 - (void)hit:(ATQHit)k i:(NSInteger)i rect:(NSRect)r {
@@ -378,8 +342,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         [_flows addObject:[ATQFlow from:obj pathId:name.stringByDeletingPathExtension]];
     }
     if (!_flows.count) {
-        ATQFlow *f = [ATQFlow blank];
-        f.name = @"Untitled";
+        ATQFlow *f = [ATQFlow blankNumbered:1];
         [_flows addObject:f];
         [self saveFlow:f];
     }
@@ -439,13 +402,13 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     [self finishEdit:YES];
     [self saveCurrent];
     NSString *task = [_field.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!task.length || ![_flow branchCount]) {
+    if (!task.length || ![_flow modelCount]) {
         NSBeep();
         return;
     }
-    /* Branches do not run side by side yet: a run is still every branch of
-       every stage, in order. */
-    ATQBranch *first = [_flow firstBranch];
+    /* Models on one step do not run side by side yet: a run is still every
+       model of every step, in order. */
+    ATQModel *first = _flow.steps.firstObject.models.firstObject;
     NSDictionary *args = @{
         @"task": task,
         @"new_tab": @(_newTabOn),
@@ -533,81 +496,65 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     [self setNeedsDisplay:YES];
 }
 
-- (ATQStage *)stageAt:(NSInteger)i {
-    if (i < 0 || (NSUInteger)i >= _flow.stages.count) return nil;
-    return _flow.stages[(NSUInteger)i];
+- (ATQStep *)stepAt:(NSInteger)i {
+    if (i < 0 || (NSUInteger)i >= _flow.steps.count) return nil;
+    return _flow.steps[(NSUInteger)i];
 }
 
-- (ATQBranch *)branchAtStage:(NSInteger)si index:(NSInteger)bi {
-    ATQStage *st = [self stageAt:si];
-    if (!st || bi < 0 || (NSUInteger)bi >= st.branches.count) return nil;
-    return st.branches[(NSUInteger)bi];
+- (ATQModel *)modelAtStep:(NSInteger)si index:(NSInteger)mi {
+    ATQStep *st = [self stepAt:si];
+    if (!st || mi < 0 || (NSUInteger)mi >= st.models.count) return nil;
+    return st.models[(NSUInteger)mi];
 }
 
-- (void)moveBranchAtStage:(NSInteger)si index:(NSInteger)bi by:(NSInteger)delta {
-    ATQStage *st = [self stageAt:si];
-    if (!st) return;
-    NSInteger dest = bi + delta;
-    if (bi < 0 || (NSUInteger)bi >= st.branches.count) return;
-    if (dest < 0 || (NSUInteger)dest >= st.branches.count) return;
-    ATQBranch *b = st.branches[(NSUInteger)bi];
-    [st.branches removeObjectAtIndex:(NSUInteger)bi];
-    [st.branches insertObject:b atIndex:(NSUInteger)dest];
-    [self stepChanged];
-}
-
-/* Removing the last branch of a stage removes the stage: an empty stage
-   would be a step that does nothing. */
-- (void)removeBranchAtStage:(NSInteger)si index:(NSInteger)bi {
-    ATQStage *st = [self stageAt:si];
-    if (!st || bi < 0 || (NSUInteger)bi >= st.branches.count) return;
-    if (st.branches.count == 1) {
-        [self removeStageAt:si];
-        return;
-    }
-    [st.branches removeObjectAtIndex:(NSUInteger)bi];
-    [self stepChanged];
-}
-
-- (void)addBranchToStage:(NSInteger)si {
-    ATQStage *st = [self stageAt:si];
-    if (!st) return;
-    [st.branches addObject:[ATQBranch named:[NSString stringWithFormat:@"branch %lu",
-                                             (unsigned long)(st.branches.count + 1)]]];
-    st.collapsed = NO;
-    [self stepChanged];
-}
-
-- (void)moveStageAt:(NSInteger)si by:(NSInteger)delta {
+- (void)moveStepAt:(NSInteger)si by:(NSInteger)delta {
     NSInteger dest = si + delta;
-    if (si < 0 || (NSUInteger)si >= _flow.stages.count) return;
-    if (dest < 0 || (NSUInteger)dest >= _flow.stages.count) return;
-    ATQStage *st = _flow.stages[(NSUInteger)si];
-    [_flow.stages removeObjectAtIndex:(NSUInteger)si];
-    [_flow.stages insertObject:st atIndex:(NSUInteger)dest];
+    if (si < 0 || (NSUInteger)si >= _flow.steps.count) return;
+    if (dest < 0 || (NSUInteger)dest >= _flow.steps.count) return;
+    ATQStep *st = _flow.steps[(NSUInteger)si];
+    [_flow.steps removeObjectAtIndex:(NSUInteger)si];
+    [_flow.steps insertObject:st atIndex:(NSUInteger)dest];
     [self stepChanged];
 }
 
-- (void)removeStageAt:(NSInteger)si {
-    if (_flow.stages.count <= 1) {
+- (void)removeStepAt:(NSInteger)si {
+    if (_flow.steps.count <= 1) {
         NSBeep();
         return;
     }
-    if (si < 0 || (NSUInteger)si >= _flow.stages.count) return;
-    [_flow.stages removeObjectAtIndex:(NSUInteger)si];
+    if (si < 0 || (NSUInteger)si >= _flow.steps.count) return;
+    [_flow.steps removeObjectAtIndex:(NSUInteger)si];
     [self stepChanged];
 }
 
-- (void)addStage {
-    [_flow.stages addObject:[ATQStage named:[NSString stringWithFormat:@"stage %lu",
-                                             (unsigned long)(_flow.stages.count + 1)]]];
+- (void)addStep {
+    [_flow.steps addObject:[ATQStep named:[NSString stringWithFormat:@"step %lu",
+                                           (unsigned long)(_flow.steps.count + 1)]]];
     [self stepChanged];
 }
 
-/* The agent chip opens the real agent list rather than cycling blindly. */
-- (void)pickAgentForStage:(NSInteger)si branch:(NSInteger)bi at:(NSPoint)p {
-    ATQBranch *branch = [self branchAtStage:si index:bi];
-    if (!branch) return;
+/* A second model on a step is what makes it parallel. */
+- (void)addModelToStep:(NSInteger)si {
+    ATQStep *st = [self stepAt:si];
+    if (!st) return;
+    [st.models addObject:[ATQModel agent:st.models.lastObject.agent ?: @"grok"]];
+    [self stepChanged];
+}
+
+- (void)removeModelAtStep:(NSInteger)si index:(NSInteger)mi {
+    ATQStep *st = [self stepAt:si];
+    if (!st || mi < 0 || (NSUInteger)mi >= st.models.count) return;
+    if (st.models.count == 1) {
+        [self removeStepAt:si];
+        return;
+    }
+    [st.models removeObjectAtIndex:(NSUInteger)mi];
+    [self stepChanged];
+}
+
+- (void)pickAgentForStep:(NSInteger)si model:(NSInteger)mi at:(NSPoint)p {
+    ATQModel *model = [self modelAtStep:si index:mi];
+    if (!model) return;
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Agent"];
     uint32_t n = at_agent_count();
     for (uint32_t i = 0; i < n; i++) {
@@ -618,11 +565,11 @@ typedef NS_ENUM(NSInteger, ATQHit) {
                                                     action:@selector(agentPicked:)
                                              keyEquivalent:@""];
         it.target = self;
-        it.representedObject = @{ @"s": @(si), @"i": @(bi), @"id": aid };
+        it.representedObject = @{ @"s": @(si), @"i": @(mi), @"id": aid };
         NSImage *img = ATAgentImage(aid);
         img.size = NSMakeSize(14, 14);
         it.image = img;
-        it.state = [branch.agent isEqualToString:aid] ? NSControlStateValueOn : NSControlStateValueOff;
+        it.state = [model.agent isEqualToString:aid] ? NSControlStateValueOn : NSControlStateValueOff;
         [menu addItem:it];
     }
     [menu popUpMenuPositioningItem:nil atLocation:p inView:self];
@@ -631,10 +578,84 @@ typedef NS_ENUM(NSInteger, ATQHit) {
 - (void)agentPicked:(NSMenuItem *)item {
     NSDictionary *d = item.representedObject;
     if (![d isKindOfClass:[NSDictionary class]]) return;
-    ATQBranch *b = [self branchAtStage:[d[@"s"] integerValue] index:[d[@"i"] integerValue]];
-    if (!b) return;
-    b.agent = d[@"id"];
+    ATQModel *m = [self modelAtStep:[d[@"s"] integerValue] index:[d[@"i"] integerValue]];
+    if (!m) return;
+    m.agent = d[@"id"];
+    m.kind = @"agent";
     [self stepChanged];
+}
+
+/* The workflow list is a menu, not a third row of tabs: the window already
+   has workspace tabs and session tabs above this page. */
+- (void)workflowMenuAt:(NSPoint)p {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Workflows"];
+    for (NSUInteger i = 0; i < _flows.count; i++) {
+        ATQFlow *f = _flows[i];
+        NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:(f.name.length ? f.name : @"Untitled")
+                                                    action:@selector(workflowPicked:)
+                                             keyEquivalent:@""];
+        it.target = self;
+        it.representedObject = @(i);
+        it.state = (f == _flow) ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:it];
+    }
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *ren = [[NSMenuItem alloc] initWithTitle:@"Rename…"
+                                                 action:@selector(renameWorkflow:) keyEquivalent:@""];
+    ren.target = self;
+    [menu addItem:ren];
+    NSMenuItem *del = [[NSMenuItem alloc] initWithTitle:@"Delete this workflow"
+                                                 action:@selector(deleteWorkflow:) keyEquivalent:@""];
+    del.target = self;
+    del.enabled = _flows.count > 1;
+    [menu addItem:del];
+    [menu popUpMenuPositioningItem:nil atLocation:p inView:self];
+}
+
+- (void)workflowPicked:(NSMenuItem *)item {
+    NSUInteger i = (NSUInteger)[item.representedObject integerValue];
+    if (i >= _flows.count) return;
+    _flow = _flows[i];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)renameWorkflow:(id)sender {
+    (void)sender;
+    ATQFlow *f = _flow;
+    if (!f) return;
+    [self editIn:_nameRect text:f.name commit:^(NSString *name) {
+        NSString *t = [name stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length) f.name = t;
+        [self saveFlow:f];
+    }];
+}
+
+- (void)deleteWorkflow:(id)sender {
+    (void)sender;
+    if (_flows.count <= 1) {
+        NSBeep();
+        return;
+    }
+    ATQFlow *f = _flow;
+    NSString *path = [[ATSupport(@"workflows") stringByAppendingPathComponent:f.fid]
+                      stringByAppendingPathExtension:@"json"];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    [_flows removeObject:f];
+    _flow = _flows.firstObject;
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)newWorkflow {
+    [self saveCurrent];
+    ATQFlow *f = [ATQFlow blankNumbered:_flows.count + 1];
+    [_flows addObject:f];
+    _flow = f;
+    [self saveFlow:f];
+    [self setNeedsLayout:YES];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)drawRect:(NSRect)dirty {
@@ -643,55 +664,7 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     NSRectFill(self.bounds);
     [_hits removeAllObjects];
     CGFloat w = NSWidth(self.bounds);
-    CGFloat y = 28;
-    [@"PIPELINE" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
-    y += 22;
-    [@"WORKFLOWS" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
-    y += 18;
-    CGFloat x = kPad;
-    NSDictionary *chipA = @{
-        NSFontAttributeName: self.metaFont,
-        NSForegroundColorAttributeName: ATColorText(),
-    };
-    NSDictionary *chipMuted = @{
-        NSFontAttributeName: self.metaFont,
-        NSForegroundColorAttributeName: ATColorMuted(),
-    };
-    for (NSUInteger i = 0; i < _flows.count; i++) {
-        ATQFlow *f = _flows[i];
-        BOOL on = f == _flow;
-        NSString *title = f.name.length ? f.name : @"Untitled";
-        NSSize sz = [title sizeWithAttributes:on ? chipA : chipMuted];
-        CGFloat cw = MIN(sz.width + 20, 180);
-        if (on) cw += 18;
-        if (x > kPad && x + cw > w - kPad) {
-            x = kPad;
-            y += kChipH + 6;
-        }
-        NSRect chip = NSMakeRect(x, y, cw, kChipH);
-        [[ATColorSurface() colorWithAlphaComponent:on ? 0.95 : 0.55] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:6 yRadius:6] fill];
-        [title drawInRect:NSMakeRect(chip.origin.x + 8, y + 5, cw - (on ? 26 : 12), 16)
-           withAttributes:on ? chipA : chipMuted];
-        [self hit:ATQHitWorkflow i:(NSInteger)i rect:chip];
-        if (on) {
-            [ATColorAccent() setFill];
-            NSRectFill(NSMakeRect(chip.origin.x + 8, y + kChipH - 2, cw - 16, 2));
-            NSRect xhit = NSMakeRect(NSMaxX(chip) - 18, y + 4, 14, 16);
-            [@"×" drawAtPoint:NSMakePoint(xhit.origin.x, y + 3) withAttributes:chipMuted];
-            [self hit:ATQHitWorkflowDel i:(NSInteger)i rect:xhit];
-            [self hit:ATQHitFlowName i:(NSInteger)i rect:NSMakeRect(chip.origin.x, y, cw - 18, kChipH)];
-        }
-        x = NSMaxX(chip) + 6;
-    }
-    NSRect plus = NSMakeRect(x, y, 28, kChipH);
-    [[ATColorSurface() colorWithAlphaComponent:0.55] setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:plus xRadius:6 yRadius:6] fill];
-    [@"+" drawAtPoint:NSMakePoint(plus.origin.x + 9, y + 3) withAttributes:chipMuted];
-    [self hit:ATQHitWorkflowNew i:0 rect:plus];
-    y += kChipH + 16;
-
-    [@"STEPS" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
+    CGFloat right = w - kPad;
     NSDictionary *titleA = @{
         NSFontAttributeName: self.titleFont,
         NSForegroundColorAttributeName: ATColorText(),
@@ -708,152 +681,163 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         NSFontAttributeName: self.metaFont,
         NSForegroundColorAttributeName: ATColorBg(),
     };
-    CGFloat right = w - kPad;
+
+    CGFloat y = 28;
+    [@"PIPELINE" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
+    y += 22;
+
+    /* one workflow, named, with a menu for the rest */
+    NSString *fname = _flow.name.length ? _flow.name : @"Untitled";
+    NSSize fs = [fname sizeWithAttributes:titleA];
+    CGFloat pickW = MIN(MAX(fs.width + 46, 160), 320);
+    NSRect pick = NSMakeRect(kPad, y, pickW, kChipH);
+    [[ATColorSurface() colorWithAlphaComponent:0.8] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:pick xRadius:7 yRadius:7] fill];
+    _nameRect = NSMakeRect(pick.origin.x + 10, y, pickW - 34, kChipH);
+    [fname drawInRect:NSMakeRect(pick.origin.x + 12, NSMidY(pick) - fs.height / 2,
+                                 pickW - 38, fs.height)
+       withAttributes:titleA];
+    NSSize cs = [@"⌄" sizeWithAttributes:metaA];
+    [@"⌄" drawAtPoint:NSMakePoint(NSMaxX(pick) - 14 - cs.width / 2, NSMidY(pick) - cs.height / 2 - 2)
+       withAttributes:metaA];
+    [self hit:ATQHitWorkflowMenu i:0 rect:pick];
+
+    NSString *newLab = @"+  new workflow";
+    NSSize nls = [newLab sizeWithAttributes:metaA];
+    NSRect newR = NSMakeRect(NSMaxX(pick) + 16, y, nls.width + 8, kChipH);
+    [newLab drawAtPoint:NSMakePoint(newR.origin.x, NSMidY(newR) - nls.height / 2) withAttributes:metaA];
+    [self hit:ATQHitWorkflowNew i:0 rect:newR];
+    y += kChipH + 20;
+
+    [@"STEPS" drawAtPoint:NSMakePoint(kPad, y) withAttributes:self.headAttrs];
+
     CGFloat sy = [self stepsTop];
-    for (NSUInteger si = 0; si < _flow.stages.count; si++) {
-        ATQStage *stage = _flow.stages[si];
-        CGFloat cardH = [self heightOfStage:stage];
-        NSRect card = NSMakeRect(kPad, sy, w - kPad * 2, cardH);
-        [[ATColorSurface() colorWithAlphaComponent:0.55] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:card xRadius:9 yRadius:9] fill];
+    for (NSUInteger si = 0; si < _flow.steps.count; si++) {
+        ATQStep *step = _flow.steps[si];
+        BOOL together = step.models.count > 1;
+        NSRect card = NSMakeRect(kPad, sy, w - kPad * 2, [self heightOfStep:step]);
+        [[ATColorSurface() colorWithAlphaComponent:0.7] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:card xRadius:8 yRadius:8] fill];
 
-        /* header ---------------------------------------------------- */
-        CGFloat hy = sy + kStageHeadH / 2;
-        NSString *idx = [NSString stringWithFormat:@"%lu", (unsigned long)(si + 1)];
-        NSSize is = [idx sizeWithAttributes:metaA];
-        [idx drawAtPoint:NSMakePoint(card.origin.x + 14, hy - is.height / 2) withAttributes:metaA];
-        NSString *sname = stage.name.length ? stage.name : @"stage";
-        NSSize ss = [sname sizeWithAttributes:titleA];
-        NSRect snameR = NSMakeRect(card.origin.x + 34, sy, 260, kStageHeadH);
-        [sname drawInRect:NSMakeRect(snameR.origin.x, hy - ss.height / 2, 260, ss.height)
-           withAttributes:titleA];
-        [self hit:ATQHitStageName s:(NSInteger)si i:0 rect:snameR];
-
-        BOOL parallel = stage.branches.count > 1;
-        BOOL human = stage.branches.count == 1 && [stage.branches[0].kind isEqualToString:@"human"];
-        NSString *note = human ? @"human"
-            : (parallel ? [NSString stringWithFormat:@"runs together · %lu branches",
-                           (unsigned long)stage.branches.count]
-                        : @"1 branch");
-        if (stage.collapsed) {
-            NSMutableArray *who = [NSMutableArray new];
-            for (ATQBranch *b in stage.branches)
-                [who addObject:[b.kind isEqualToString:@"human"] ? @"you" : ATAgentDisplayName(b.agent)];
-            note = [NSString stringWithFormat:@"%@ · %@", note, [who componentsJoinedByString:@", "]];
-        }
-        NSSize ns = [note sizeWithAttributes:metaA];
-        CGFloat noteRight = right - 108;
-        [note drawAtPoint:NSMakePoint(noteRight - ns.width, hy - ns.height / 2) withAttributes:metaA];
-
-        struct { NSString *g; ATQHit k; CGFloat off; } sctl[] = {
-            { stage.collapsed ? @"›" : @"⌄", ATQHitStageFold, 96 },
-            { @"↑", ATQHitStageUp, 70 },
-            { @"↓", ATQHitStageDown, 46 },
-            { @"×", ATQHitStageRemove, 22 },
-        };
-        for (int g = 0; g < 4; g++) {
-            NSRect gr = NSMakeRect(right - sctl[g].off, hy - 11, 22, 22);
-            NSSize gs = [sctl[g].g sizeWithAttributes:metaA];
-            [sctl[g].g drawAtPoint:NSMakePoint(NSMidX(gr) - gs.width / 2, hy - gs.height / 2)
-                    withAttributes:metaA];
-            [self hit:sctl[g].k s:(NSInteger)si i:0 rect:gr];
-        }
-        if (stage.collapsed) {
-            sy += cardH + kStageGap;
-            continue;
+        /* the rail says these models work on the step at the same time */
+        if (together) {
+            [[ATColorAccent() colorWithAlphaComponent:0.5] setFill];
+            NSRectFill(NSMakeRect(card.origin.x + 112, sy + kModelH - 6,
+                                  2, (step.models.count - 1) * kModelH - 8));
         }
 
-        /* the rail marks the branches that run at the same time ------ */
-        CGFloat by = sy + kStageHeadH;
-        if (parallel) {
-            [[ATColorAccent() colorWithAlphaComponent:0.55] setFill];
-            NSRectFill(NSMakeRect(card.origin.x + 20, by + 8,
-                                  2, stage.branches.count * kBranchH - 16));
-        }
+        for (NSUInteger mi = 0; mi < step.models.count; mi++) {
+            ATQModel *m = step.models[mi];
+            BOOL human = [m.kind isEqualToString:@"human"];
+            BOOL firstLine = (mi == 0);
+            BOOL lastLine = (mi + 1 == step.models.count);
+            CGFloat mid = sy + mi * kModelH + kModelH / 2;
 
-        for (NSUInteger bi = 0; bi < stage.branches.count; bi++) {
-            ATQBranch *b = stage.branches[bi];
-            BOOL bhuman = [b.kind isEqualToString:@"human"];
-            NSRect row = NSMakeRect(card.origin.x + kBranchIndent + 8, by,
-                                    card.size.width - kBranchIndent - 16, kBranchH);
-            CGFloat mid = NSMidY(row);
+            if (firstLine) {
+                NSString *idx = [NSString stringWithFormat:@"%lu", (unsigned long)(si + 1)];
+                NSSize is = [idx sizeWithAttributes:metaA];
+                [idx drawAtPoint:NSMakePoint(card.origin.x + 14, mid - is.height / 2)
+                  withAttributes:metaA];
+                NSString *nm = step.name.length ? step.name : @"do";
+                CGFloat nameX = card.origin.x + 36;
+                CGFloat nameW = MAX(70, right - kStepCtlW - 16 - nameX);
+                NSSize nsz = [nm sizeWithAttributes:titleA];
+                [nm drawInRect:NSMakeRect(nameX, mid - nsz.height / 2, nameW, nsz.height)
+                withAttributes:titleA];
+                [self hit:ATQHitStepName s:(NSInteger)si i:0
+                     rect:NSMakeRect(nameX, mid - kModelH / 2, nameW, kModelH)];
+            } else if (mi == 1) {
+                NSString *lab = @"at the same time";
+                NSSize ls = [lab sizeWithAttributes:metaA];
+                [lab drawAtPoint:NSMakePoint(card.origin.x + 36, mid - ls.height / 2)
+                  withAttributes:metaA];
+            }
 
-            NSString *nm = b.name.length ? b.name : @"do";
-            CGFloat nameX = row.origin.x + 10;
-            CGFloat nameW = MAX(70, right - kStepCtlW - 16 - nameX);
-            NSRect nameR = NSMakeRect(nameX, row.origin.y, nameW, row.size.height);
-            NSSize nsz = [nm sizeWithAttributes:titleA];
-            [nm drawInRect:NSMakeRect(nameX, mid - nsz.height / 2, nameW, nsz.height)
-            withAttributes:titleA];
-            [self hit:ATQHitStepName s:(NSInteger)si i:(NSInteger)bi rect:nameR];
-
-            struct { NSString *g; ATQHit k; CGFloat off; } bctl[] = {
-                { @"×", ATQHitStepRemove, 22 },
-                { @"↓", ATQHitStepDown, 46 },
-                { @"↑", ATQHitStepUp, 70 },
-            };
-            for (int g = 0; g < 3; g++) {
-                NSRect gr = NSMakeRect(right - bctl[g].off, mid - 11, 22, 22);
-                NSSize gs = [bctl[g].g sizeWithAttributes:metaA];
-                [bctl[g].g drawAtPoint:NSMakePoint(NSMidX(gr) - gs.width / 2, mid - gs.height / 2)
-                        withAttributes:metaA];
-                [self hit:bctl[g].k s:(NSInteger)si i:(NSInteger)bi rect:gr];
+            /* step controls on the first line, remove-this-model after it */
+            if (firstLine) {
+                struct { NSString *g; ATQHit k; CGFloat off; } ctl[] = {
+                    { @"×", ATQHitStepRemove, 22 },
+                    { @"↓", ATQHitStepDown, 46 },
+                    { @"↑", ATQHitStepUp, 70 },
+                };
+                for (int g = 0; g < 3; g++) {
+                    NSRect gr = NSMakeRect(right - ctl[g].off, mid - 11, 22, 22);
+                    NSSize gs = [ctl[g].g sizeWithAttributes:metaA];
+                    [ctl[g].g drawAtPoint:NSMakePoint(NSMidX(gr) - gs.width / 2, mid - gs.height / 2)
+                           withAttributes:metaA];
+                    [self hit:ctl[g].k s:(NSInteger)si i:0 rect:gr];
+                }
+            } else {
+                NSRect gr = NSMakeRect(right - 22, mid - 11, 22, 22);
+                NSSize gs = [@"×" sizeWithAttributes:metaA];
+                [@"×" drawAtPoint:NSMakePoint(NSMidX(gr) - gs.width / 2, mid - gs.height / 2)
+                   withAttributes:metaA];
+                [self hit:ATQHitModelRemove s:(NSInteger)si i:(NSInteger)mi rect:gr];
             }
 
             CGFloat pillW = 116, pillH = 24;
             NSRect pill = NSMakeRect(right - 70 - 12 - pillW, mid - pillH / 2, pillW, pillH);
             [[ATColorHair() colorWithAlphaComponent:0.7] setFill];
             [[NSBezierPath bezierPathWithRoundedRect:pill xRadius:12 yRadius:12] fill];
-            NSRect live = NSMakeRect(bhuman ? NSMidX(pill) : pill.origin.x, pill.origin.y,
+            NSRect live = NSMakeRect(human ? NSMidX(pill) : pill.origin.x, pill.origin.y,
                                      pillW / 2, pillH);
             [ATColorAccent() setFill];
             [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(live, 2, 2) xRadius:10 yRadius:10] fill];
             NSString *labs[2] = { @"agent", @"human" };
             for (int h = 0; h < 2; h++) {
-                BOOL lit = (h == 1) == bhuman;
+                BOOL lit = (h == 1) == human;
                 NSSize ls = [labs[h] sizeWithAttributes:metaA];
                 CGFloat cx = pill.origin.x + pillW / 4 + (h ? pillW / 2 : 0);
                 [labs[h] drawAtPoint:NSMakePoint(cx - ls.width / 2, mid - ls.height / 2)
                       withAttributes:lit ? onDarkMeta : metaA];
             }
-            [self hit:ATQHitStepKind s:(NSInteger)si i:(NSInteger)bi rect:pill];
+            [self hit:ATQHitModelKind s:(NSInteger)si i:(NSInteger)mi rect:pill];
 
-            if (!bhuman) {
+            /* the + that makes a step parallel sits after the last model */
+            CGFloat plusW = 24;
+            NSRect plus = NSMakeRect(pill.origin.x - 12 - plusW, mid - 12, plusW, 24);
+            if (lastLine) {
+                [[ATColorHair() colorWithAlphaComponent:0.5] setFill];
+                [[NSBezierPath bezierPathWithRoundedRect:plus xRadius:6 yRadius:6] fill];
+                NSSize ps = [@"+" sizeWithAttributes:metaA];
+                [@"+" drawAtPoint:NSMakePoint(NSMidX(plus) - ps.width / 2, mid - ps.height / 2)
+                   withAttributes:metaA];
+                [self hit:ATQHitModelAdd s:(NSInteger)si i:0 rect:plus];
+            }
+
+            if (!human) {
                 CGFloat chipW = 104, chipH = 24;
-                NSRect chip = NSMakeRect(pill.origin.x - 12 - chipW, mid - chipH / 2, chipW, chipH);
+                NSRect chip = NSMakeRect(plus.origin.x - 10 - chipW, mid - chipH / 2, chipW, chipH);
                 [[ATColorHair() colorWithAlphaComponent:0.7] setFill];
                 [[NSBezierPath bezierPathWithRoundedRect:chip xRadius:6 yRadius:6] fill];
-                NSImage *icon = ATAgentImage(b.agent);
+                NSImage *icon = ATAgentImage(m.agent);
                 icon.size = NSMakeSize(13, 13);
                 [icon drawInRect:NSMakeRect(chip.origin.x + 8, mid - 6.5, 13, 13)
                         fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
-                NSString *an = ATAgentDisplayName(b.agent);
+                NSString *an = ATAgentDisplayName(m.agent);
                 NSSize as = [an sizeWithAttributes:metaA];
                 [an drawInRect:NSMakeRect(chip.origin.x + 27, mid - as.height / 2, chipW - 43, as.height)
                 withAttributes:metaA];
-                NSSize cs = [@"⌄" sizeWithAttributes:metaA];
-                [@"⌄" drawAtPoint:NSMakePoint(NSMaxX(chip) - 8 - cs.width, mid - cs.height / 2 - 2)
+                NSSize dcs = [@"⌄" sizeWithAttributes:metaA];
+                [@"⌄" drawAtPoint:NSMakePoint(NSMaxX(chip) - 8 - dcs.width, mid - dcs.height / 2 - 2)
                    withAttributes:metaA];
-                [self hit:ATQHitStepAgent s:(NSInteger)si i:(NSInteger)bi rect:chip];
+                [self hit:ATQHitModelAgent s:(NSInteger)si i:(NSInteger)mi rect:chip];
+            } else {
+                NSString *you = @"you";
+                NSSize ys = [you sizeWithAttributes:metaA];
+                [you drawAtPoint:NSMakePoint(plus.origin.x - 10 - 104 + 8, mid - ys.height / 2)
+                  withAttributes:metaA];
             }
-            by += kBranchH;
         }
-
-        NSRect addB = NSMakeRect(card.origin.x + kBranchIndent + 18, by, 86, kAddRowH - 4);
-        NSSize abs_ = [@"+  branch" sizeWithAttributes:metaA];
-        [@"+  branch" drawAtPoint:NSMakePoint(addB.origin.x, by + (kAddRowH - 4 - abs_.height) / 2)
-                   withAttributes:metaA];
-        [self hit:ATQHitBranchAdd s:(NSInteger)si i:0 rect:addB];
-        sy += cardH + kStageGap;
+        sy += [self heightOfStep:step] + kStepGap;
     }
 
-    CGFloat ay = [self addStageTop];
+    CGFloat ay = [self addStepTop];
     NSRect addS = NSMakeRect(kPad, ay, 86, kAddRowH - 4);
-    NSSize ads = [@"+  stage" sizeWithAttributes:metaA];
-    [@"+  stage" drawAtPoint:NSMakePoint(kPad, ay + (kAddRowH - 4 - ads.height) / 2) withAttributes:metaA];
-    [self hit:ATQHitStageAdd i:0 rect:addS];
+    NSSize ads = [@"+  step" sizeWithAttributes:metaA];
+    [@"+  step" drawAtPoint:NSMakePoint(kPad, ay + (kAddRowH - 4 - ads.height) / 2) withAttributes:metaA];
+    [self hit:ATQHitStepAdd i:0 rect:addS];
 
-    /* the rule that separates building a workflow from running one */
     CGFloat ty = [self taskTop];
     [[ATColorHair() colorWithAlphaComponent:0.6] setFill];
     NSRectFill(NSMakeRect(kPad, ty - 15, w - kPad * 2, 1));
@@ -991,58 +975,17 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         NSInteger i = [h[@"i"] integerValue];
         NSInteger sIdx = [h[@"s"] integerValue];
         switch (k) {
-        case ATQHitWorkflow:
-            if ((NSUInteger)i < _flows.count) _flow = _flows[(NSUInteger)i];
-            [self setNeedsDisplay:YES];
-            [self setNeedsLayout:YES];
+        case ATQHitWorkflowMenu:
+            [self workflowMenuAt:NSMakePoint(r.origin.x, NSMaxY(r) + 2)];
             return;
-        case ATQHitFlowName: {
-            ATQFlow *f = _flow;
-            [self editIn:r text:f.name commit:^(NSString *name) {
-                NSString *t = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                if (t.length) f.name = t;
-                [self saveFlow:f];
-            }];
+        case ATQHitWorkflowNew:
+            [self newWorkflow];
             return;
-        }
-        case ATQHitWorkflowNew: {
-            [self saveCurrent];
-            ATQFlow *f = [ATQFlow blank];
-            [_flows addObject:f];
-            _flow = f;
-            [self saveFlow:f];
-            [self setNeedsDisplay:YES];
-            [self setNeedsLayout:YES];
+        case ATQHitFlowName:
+            [self renameWorkflow:nil];
             return;
-        }
-        case ATQHitWorkflowDel: {
-            if (_flows.count <= 1) {
-                NSBeep();
-                return;
-            }
-            ATQFlow *f = ((NSUInteger)i < _flows.count) ? _flows[(NSUInteger)i] : _flow;
-            NSString *path = [[ATSupport(@"workflows") stringByAppendingPathComponent:f.fid]
-                              stringByAppendingPathExtension:@"json"];
-            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-            [_flows removeObject:f];
-            _flow = _flows.firstObject;
-            [self setNeedsDisplay:YES];
-            [self setNeedsLayout:YES];
-            return;
-        }
         case ATQHitStepName: {
-            ATQBranch *b = [self branchAtStage:sIdx index:i];
-            if (!b) return;
-            [self editIn:r text:b.name commit:^(NSString *name) {
-                NSString *t = [name stringByTrimmingCharactersInSet:
-                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                if (t.length) b.name = t;
-                [self saveCurrent];
-            }];
-            return;
-        }
-        case ATQHitStageName: {
-            ATQStage *st = [self stageAt:sIdx];
+            ATQStep *st = [self stepAt:sIdx];
             if (!st) return;
             [self editIn:r text:st.name commit:^(NSString *name) {
                 NSString *t = [name stringByTrimmingCharactersInSet:
@@ -1052,53 +995,33 @@ typedef NS_ENUM(NSInteger, ATQHit) {
             }];
             return;
         }
-        case ATQHitStepAgent:
-            [self pickAgentForStage:sIdx branch:i at:NSMakePoint(r.origin.x, NSMaxY(r) + 2)];
-            return;
-        case ATQHitStepKind: {
-            ATQBranch *b = [self branchAtStage:sIdx index:i];
-            if (!b) return;
-            b.kind = (p.x > NSMidX(r)) ? @"human" : @"agent";
-            [self stepChanged];
-            return;
-        }
         case ATQHitStepUp:
-            [self moveBranchAtStage:sIdx index:i by:-1];
+            [self moveStepAt:sIdx by:-1];
             return;
         case ATQHitStepDown:
-            [self moveBranchAtStage:sIdx index:i by:1];
+            [self moveStepAt:sIdx by:1];
             return;
         case ATQHitStepRemove:
-            [self removeBranchAtStage:sIdx index:i];
+            [self removeStepAt:sIdx];
             return;
-        case ATQHitBranchAdd:
-            [self addBranchToStage:sIdx];
+        case ATQHitStepAdd:
+            [self addStep];
             return;
-        case ATQHitStageUp:
-            [self moveStageAt:sIdx by:-1];
+        case ATQHitModelAgent:
+            [self pickAgentForStep:sIdx model:i at:NSMakePoint(r.origin.x, NSMaxY(r) + 2)];
             return;
-        case ATQHitStageDown:
-            [self moveStageAt:sIdx by:1];
-            return;
-        case ATQHitStageRemove:
-            [self removeStageAt:sIdx];
-            return;
-        case ATQHitStageFold: {
-            ATQStage *st = [self stageAt:sIdx];
-            if (!st) return;
-            st.collapsed = !st.collapsed;
+        case ATQHitModelKind: {
+            ATQModel *m = [self modelAtStep:sIdx index:i];
+            if (!m) return;
+            m.kind = (p.x > NSMidX(r)) ? @"human" : @"agent";
             [self stepChanged];
             return;
         }
-        case ATQHitStageAdd:
-            [self addStage];
+        case ATQHitModelAdd:
+            [self addModelToStep:sIdx];
             return;
-        case ATQHitNewTab:
-            _newTabOn = !_newTabOn;
-            [self setNeedsDisplay:YES];
-            return;
-        case ATQHitRun:
-            [self run:nil];
+        case ATQHitModelRemove:
+            [self removeModelAtStep:sIdx index:i];
             return;
         case ATQHitOpen: {
             NSString *tab = h[@"tab"];
