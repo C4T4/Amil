@@ -174,16 +174,9 @@ typedef NS_ENUM(NSInteger, ATQHit) {
     f.steps = [NSMutableArray arrayWithObject:[ATQStep named:@"do"]];
     return f;
 }
-/* A run is still one model at a time: every model of every step, in order. */
 - (NSArray *)stepsJson {
     NSMutableArray *out = [NSMutableArray new];
-    for (ATQStep *s in self.steps) {
-        for (ATQModel *m in s.models) {
-            [out addObject:@{ @"name": s.name ?: @"do",
-                              @"kind": m.kind ?: @"agent",
-                              @"agent": m.agent ?: @"grok" }];
-        }
-    }
+    for (ATQStep *s in self.steps) [out addObject:[s json]];
     return out;
 }
 - (NSUInteger)modelCount {
@@ -406,8 +399,6 @@ typedef NS_ENUM(NSInteger, ATQHit) {
         NSBeep();
         return;
     }
-    /* Models on one step do not run side by side yet: a run is still every
-       model of every step, in order. */
     ATQModel *first = _flow.steps.firstObject.models.firstObject;
     NSDictionary *args = @{
         @"task": task,

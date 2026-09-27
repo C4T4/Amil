@@ -2753,6 +2753,64 @@ static int ATUiFocusTab(void *ctx, const char *workspace, const char *tab) {
     return -1;
 }
 
+/* Split the tab's active pane and hand back the pane that split made. The
+   store splits whatever is active, so the caller gets the new one by asking
+   the store which pane is active afterwards. */
+static int ATUiPaneSetAgent(void *ctx, const char *pane, const char *agent) {
+    ATWindowController *wc = (__bridge ATWindowController *)ctx;
+    if (!pane || !agent) return -1;
+    ATStore *store = wc.app.store;
+    uint32_t nw = at_store_workspace_count(store);
+    for (uint32_t i = 0; i < nw; i++) {
+        uint32_t nt = at_store_tab_count(store, i);
+        for (uint32_t t = 0; t < nt; t++) {
+            if (at_store_set_pane_agent(store, i, t, pane, agent) == 0) {
+                [wc reload];
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+static int ATUiPaneSplit(void *ctx, const char *workspace, const char *tab, int horiz) {
+    ATWindowController *wc = (__bridge ATWindowController *)ctx;
+    ATStore *store = wc.app.store;
+    int32_t wi = -1;
+    if (workspace && workspace[0]) {
+        uint32_t n = at_store_workspace_count(store);
+        for (uint32_t i = 0; i < n; i++) {
+            const char *id = at_store_id(store, i);
+            if (id && strcmp(id, workspace) == 0) {
+                wi = (int32_t)i;
+                break;
+            }
+        }
+    } else {
+        wi = at_store_active_index(store);
+    }
+    if (wi < 0) return -1;
+    int32_t ti = -1;
+    uint32_t tn = at_store_tab_count(store, (uint32_t)wi);
+    if (tab && tab[0]) {
+        for (uint32_t t = 0; t < tn; t++) {
+            const char *id = at_store_tab_id(store, (uint32_t)wi, t);
+            if (id && strcmp(id, tab) == 0) {
+                ti = (int32_t)t;
+                break;
+            }
+        }
+    } else {
+        ti = at_store_active_tab(store, (uint32_t)wi);
+    }
+    if (ti < 0) return -1;
+    at_store_set_active(store, wi);
+    at_store_set_active_tab(store, (uint32_t)wi, ti);
+    if (at_store_split(store, (uint32_t)wi, (uint32_t)ti, horiz) != 0) return -1;
+    [wc reload];
+    return 0;
+}
+
 static int ATUiTabAdd(void *ctx, const char *workspace, const char *agent, const char *session) {
     (void)session;
     ATWindowController *wc = (__bridge ATWindowController *)ctx;
@@ -2814,6 +2872,8 @@ static int ATIoUnwatch(void *ctx, int fd) {
     ui.pane_write = ATUiPaneWrite;
     ui.pane_activity = ATUiPaneActivity;
     ui.tab_add = ATUiTabAdd;
+    ui.pane_split = ATUiPaneSplit;
+    ui.pane_set_agent = ATUiPaneSetAgent;
     ui.focus_workspace = ATUiFocusWorkspace;
     ui.focus_tab = ATUiFocusTab;
     at_control_start(self.store, &ui, &io);

@@ -47,6 +47,7 @@ typedef struct ATControlUI {
     int  (*tab_close)(void *ctx, const char *workspace_id, const char *tab_id);
     int  (*pane_close)(void *ctx, const char *pane_id);
     int  (*pane_split)(void *ctx, const char *workspace_id, const char *tab_id, int horiz);
+    int  (*pane_set_agent)(void *ctx, const char *pane_id, const char *agent);
     int  (*workspace_create)(void *ctx, const char *name, const char *const *folders, uint32_t n, const char *agent);
     int  (*workspace_close)(void *ctx, const char *workspace_id);
 } ATControlUI;

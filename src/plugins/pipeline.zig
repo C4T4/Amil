@@ -150,7 +150,13 @@ fn jsonRaw(src: []const u8, key: []const u8) []const u8 {
         if (!std.mem.eql(u8, src[i + 1 .. i + 1 + key.len], key)) continue;
         if (src[i + 1 + key.len] != '"') continue;
         var j = i + 1 + key.len + 1;
-        while (j < src.len and (src[j] == ':' or src[j] == ' ' or src[j] == '\n' or src[j] == '\t')) j += 1;
+        // A quoted token is only a key if a colon follows it. Without this
+        // check the value in {"kind":"agent","agent":"claude"} matches a
+        // search for "agent" and the real key is never reached.
+        while (j < src.len and (src[j] == ' ' or src[j] == '\n' or src[j] == '\t')) j += 1;
+        if (j >= src.len or src[j] != ':') continue;
+        j += 1;
+        while (j < src.len and (src[j] == ' ' or src[j] == '\n' or src[j] == '\t')) j += 1;
         if (j >= src.len) return "";
         const start = j;
         const open = src[j];
@@ -227,6 +233,127 @@ fn stepCount(raw: []const u8) u32 {
     var n: u32 = 0;
     while (stepNth(raw, n).len > 0) n += 1;
     return n;
+}
+
+// The models of one step. objNth walks an array of objects the same way
+// stepNth walks "steps"; both hand back the raw object text.
+fn objNth(arr: []const u8, idx: u32) []const u8 {
+    if (arr.len < 2 or arr[0] != '[') return "";
+    const inner = arr[1 .. arr.len - 1];
+    var n: u32 = 0;
+    var i: usize = 0;
+    while (i < inner.len) {
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\n' or inner[i] == '\t' or inner[i] == ',' or inner[i] == '\r')) i += 1;
+        if (i >= inner.len) break;
+        if (inner[i] != '{') break;
+        const start = i;
+        var depth: i32 = 0;
+        while (i < inner.len) : (i += 1) {
+            const c = inner[i];
+            if (c == '"') {
+                skipString(inner, &i);
+                i -= 1;
+                continue;
+            }
+            if (c == '{') depth += 1;
+            if (c == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    const obj = inner[start .. i + 1];
+                    if (n == idx) return obj;
+                    n += 1;
+                    i += 1;
+                    break;
+                }
+            }
+        } else break;
+    }
+    return "";
+}
+
+fn modelNth(raw: []const u8, step: u32, idx: u32) []const u8 {
+    const st = stepNth(raw, step);
+    if (st.len == 0) return "";
+    const models = jsonRaw(st, "models");
+    if (models.len == 0) {
+        // A step written before models existed is one model: itself.
+        return if (idx == 0) st else "";
+    }
+    return objNth(models, idx);
+}
+
+fn modelCount(raw: []const u8, step: u32) u32 {
+    var n: u32 = 0;
+    while (modelNth(raw, step, n).len > 0) n += 1;
+    return n;
+}
+
+fn modelIsHuman(raw: []const u8, step: u32, mi: u32) bool {
+    return std.mem.eql(u8, jsonGet(modelNth(raw, step, mi), "kind"), "human");
+}
+
+fn modelAgent(raw: []const u8, step: u32, mi: u32) []const u8 {
+    const a = jsonGet(modelNth(raw, step, mi), "agent");
+    if (a.len > 0 and !std.mem.eql(u8, a, "human")) return a;
+    const fallback = jsonGet(raw, "agent");
+    return if (fallback.len > 0) fallback else "grok";
+}
+
+// <job>/<step>/m<i> holds one model's prompt, output and state.
+fn modelDir(dir: []const u8, step: u32, mi: u32) ?[]u8 {
+    var buf: [32]u8 = undefined;
+    const rel = std.fmt.bufPrint(&buf, "{d}/m{d}", .{ step, mi }) catch return null;
+    return std.fs.path.join(gpa, &.{ dir, rel }) catch null;
+}
+
+fn modelFile(dir: []const u8, step: u32, mi: u32, leaf: []const u8) ?[]u8 {
+    const md = modelDir(dir, step, mi) orelse return null;
+    defer gpa.free(md);
+    return std.fs.path.join(gpa, &.{ md, leaf }) catch null;
+}
+
+fn readModelState(dir: []const u8, step: u32, mi: u32) ?[]u8 {
+    const path = modelFile(dir, step, mi, "state") orelse return null;
+    defer gpa.free(path);
+    return readFile(path);
+}
+
+fn writeModelState(dir: []const u8, step: u32, mi: u32, status: []const u8,
+                   pane: []const u8, started: i64, had_busy: bool, misses: u32,
+                   reason: []const u8) void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    body.appendSlice(gpa, "{\"status\":\"") catch return;
+    body.appendSlice(gpa, status) catch return;
+    body.appendSlice(gpa, "\",\"pane\":\"") catch return;
+    body.appendSlice(gpa, pane) catch return;
+    body.appendSlice(gpa, "\",\"started_s\":") catch return;
+    var nb: [24]u8 = undefined;
+    body.appendSlice(gpa, std.fmt.bufPrint(&nb, "{d}", .{started}) catch "0") catch return;
+    body.appendSlice(gpa, ",\"had_busy\":") catch return;
+    body.appendSlice(gpa, if (had_busy) "true" else "false") catch return;
+    body.appendSlice(gpa, ",\"misses\":") catch return;
+    var mb: [16]u8 = undefined;
+    body.appendSlice(gpa, std.fmt.bufPrint(&mb, "{d}", .{misses}) catch "0") catch return;
+    if (reason.len > 0) {
+        body.appendSlice(gpa, ",\"reason\":\"") catch return;
+        escapeJson(&body, reason);
+        body.appendSlice(gpa, "\"") catch return;
+    }
+    body.appendSlice(gpa, "}\n") catch return;
+    const path = modelFile(dir, step, mi, "state") orelse return;
+    defer gpa.free(path);
+    writeFile(path, body.items);
+}
+
+fn setModelStatus(dir: []const u8, step: u32, mi: u32, status: []const u8, reason: []const u8) void {
+    const cur = readModelState(dir, step, mi) orelse return;
+    defer gpa.free(cur);
+    writeModelState(dir, step, mi, status, jsonGet(cur, "pane"),
+                    std.fmt.parseInt(i64, jsonGet(cur, "started_s"), 10) catch 0,
+                    std.mem.eql(u8, jsonGet(cur, "had_busy"), "true"),
+                    std.fmt.parseInt(u32, jsonGet(cur, "misses"), 10) catch 0,
+                    reason);
 }
 
 fn isHuman(raw: []const u8, step: u32) bool {
@@ -318,6 +445,8 @@ fn noteMiss(dir: []const u8, raw: []const u8) void {
 }
 
 fn tick() void {
+    active_models = counted_live;
+    counted_live = 0;
     const root = supportDir();
     if (root.len == 0) return;
     const qpath = std.fs.path.join(gpa, &.{ root, "queue" }) catch return;
@@ -336,6 +465,18 @@ fn tick() void {
     }
 }
 
+// At most this many models may be live at once across every job. Three
+// agents is already half a gigabyte; without a ceiling one Run can spawn a
+// dozen.
+// How long a model gets to come up before we call it broken.
+const kArmTimeout: i64 = 45;
+// A TUI that has just settled needs a beat before it owns the keyboard.
+const kArmSettle: i64 = 2;
+const kMaxActive: u32 = 4;
+// Budget for this pass, taken from what the last pass actually saw live.
+var active_models: u32 = 0;
+var counted_live: u32 = 0;
+
 fn tickJob(dir: []const u8) void {
     const jp = std.fs.path.join(gpa, &.{ dir, "job.json" }) catch return;
     defer gpa.free(jp);
@@ -343,58 +484,126 @@ fn tickJob(dir: []const u8) void {
     defer gpa.free(raw);
     const status = jsonGet(raw, "status");
     if (std.mem.eql(u8, status, "done") or std.mem.eql(u8, status, "error")) return;
-    if (std.mem.eql(u8, status, "human")) {
-        const ap = std.fs.path.join(gpa, &.{ dir, "APPROVE" }) catch return;
-        defer gpa.free(ap);
-        if (exists(ap)) advance(dir, raw);
-        return;
-    }
+    const step: u32 = std.fmt.parseInt(u32, jsonGet(raw, "step"), 10) catch 0;
     if (std.mem.eql(u8, status, "queued")) {
-        startStep(dir, raw, 0);
+        startStep(dir, raw, step);
         return;
     }
-    const pane = jsonGet(raw, "pane");
-    const step_s = jsonGet(raw, "step");
-    const step: u32 = std.fmt.parseInt(u32, step_s, 10) catch 0;
-    if (std.mem.eql(u8, status, "arming")) {
-        armStep(dir, raw, step, pane);
+    const n = modelCount(raw, step);
+    if (n == 0) {
+        fail(dir, raw, "this step has no model to run it");
         return;
     }
-    var done_path_buf: [8]u8 = undefined;
-    const done_name = std.fmt.bufPrint(&done_path_buf, "{d}/DONE", .{step}) catch return;
-    const done_path = std.fs.path.join(gpa, &.{ dir, done_name }) catch return;
-    defer gpa.free(done_path);
-    if (exists(done_path)) {
-        advance(dir, raw);
+    var mi: u32 = 0;
+    while (mi < n) : (mi += 1) tickModel(dir, step, mi);
+
+    // Re-read: a model that just finished changed its own file.
+    var done: u32 = 0;
+    mi = 0;
+    while (mi < n) : (mi += 1) {
+        const st = readModelState(dir, step, mi) orelse continue;
+        defer gpa.free(st);
+        const ms = jsonGet(st, "status");
+        if (std.mem.eql(u8, ms, "arming") or std.mem.eql(u8, ms, "running") or
+            std.mem.eql(u8, ms, "needs_you")) counted_live += 1;
+        if (std.mem.eql(u8, ms, "done")) {
+            done += 1;
+        } else if (std.mem.eql(u8, ms, "error")) {
+            var buf: [160]u8 = undefined;
+            const why = jsonGet(st, "reason");
+            const msg = std.fmt.bufPrint(&buf, "{s} on step {d}: {s}",
+                .{ modelAgent(raw, step, mi), step + 1, why }) catch "a model failed";
+            fail(dir, raw, msg);
+            return;
+        }
+    }
+    if (done == n) advance(dir, raw);
+}
+
+fn tickModel(dir: []const u8, step: u32, mi: u32) void {
+    const st = readModelState(dir, step, mi) orelse return;
+    defer gpa.free(st);
+    const status = jsonGet(st, "status");
+    if (std.mem.eql(u8, status, "done") or std.mem.eql(u8, status, "error")) return;
+
+    // A human model is a gate: it waits for Approve.
+    if (std.mem.eql(u8, status, "human")) {
+        const ap = modelFile(dir, step, mi, "APPROVE") orelse return;
+        defer gpa.free(ap);
+        if (exists(ap)) setModelStatus(dir, step, mi, "done", "");
         return;
     }
+
+    const pane = jsonGet(st, "pane");
+    const started = std.fmt.parseInt(i64, jsonGet(st, "started_s"), 10) catch 0;
+    const had_busy = std.mem.eql(u8, jsonGet(st, "had_busy"), "true");
+    const misses = std.fmt.parseInt(u32, jsonGet(st, "misses"), 10) catch 0;
+    const now = time(null);
+
+    const dp = modelFile(dir, step, mi, "DONE") orelse return;
+    defer gpa.free(dp);
+    if (exists(dp)) {
+        setModelStatus(dir, step, mi, "done", "");
+        return;
+    }
+
     const act = paneActivity(pane) orelse {
-        noteMiss(dir, raw);
+        if (misses + 1 >= kMaxMisses) {
+            setModelStatus(dir, step, mi, "error", "its pane is gone");
+        } else {
+            writeModelState(dir, step, mi, status, pane, started, had_busy, misses + 1, "");
+        }
         return;
     };
-    // 0 = no process. The agent we were talking to is dead; say so.
-    if (act == 0) {
-        fail(dir, raw, "the agent exited before the step finished");
+
+    if (std.mem.eql(u8, status, "arming")) {
+        if (act == 0) {
+            if (started > 0 and now >= started + kArmTimeout)
+                setModelStatus(dir, step, mi, "error", "it never started — open its pane to see why");
+            return;
+        }
+        if (act == 3) {
+            if (!had_busy) writeModelState(dir, step, mi, status, pane, started, true, 0, "");
+            return;
+        }
+        if (started > 0 and now < started + kArmSettle) return;
+        const pp = modelFile(dir, step, mi, "prompt.txt") orelse return;
+        defer gpa.free(pp);
+        const prompt = readFile(pp) orelse {
+            setModelStatus(dir, step, mi, "error", "its prompt went missing");
+            return;
+        };
+        defer gpa.free(prompt);
+        if (!sendPrompt(pane, prompt)) {
+            if (started > 0 and now >= started + kArmTimeout)
+                setModelStatus(dir, step, mi, "error", "its pane would not take the prompt");
+            return;
+        }
+        writeModelState(dir, step, mi, "running", pane, now, false, 0, "");
+        var mb: [64]u8 = undefined;
+        logLine(dir, std.fmt.bufPrint(&mb, "step {d} model {d} prompt sent", .{ step + 1, mi + 1 }) catch "prompt sent");
         return;
     }
-    // 2 = the agent is asking the user. Never skip that step.
+
+    // running
+    if (act == 0) {
+        setModelStatus(dir, step, mi, "error", "it exited before finishing the step");
+        return;
+    }
     if (act == 2) {
         if (!std.mem.eql(u8, status, "needs_you"))
-            rewriteJob(dir, raw, "status", "needs_you", null, null);
+            writeModelState(dir, step, mi, "needs_you", pane, started, had_busy, 0, "");
         return;
     }
     if (std.mem.eql(u8, status, "needs_you"))
-        rewriteJob(dir, raw, "status", "running", null, null);
-    const had = jsonGet(raw, "had_busy");
-    if (act == 3 and !std.mem.eql(u8, had, "true")) {
-        rewriteJob(dir, raw, "had_busy", "true", null, null);
+        writeModelState(dir, step, mi, "running", pane, started, had_busy, 0, "");
+    if (act == 3) {
+        if (!had_busy) writeModelState(dir, step, mi, "running", pane, started, true, 0, "");
         return;
     }
-    const started_s = jsonGet(raw, "started_s");
-    const started = std.fmt.parseInt(i64, started_s, 10) catch 0;
-    const now = time(null);
-    const idle = act == 1 and std.mem.eql(u8, had, "true") and started > 0 and now >= started + 12;
-    if (idle) advance(dir, raw);
+    // Standby after working, and no DONE: treat a long quiet as finished.
+    if (act == 1 and had_busy and started > 0 and now >= started + 12)
+        setModelStatus(dir, step, mi, "done", "");
 }
 
 fn readCapped(path: []const u8, max: usize) []u8 {
@@ -534,185 +743,197 @@ fn focusTab(tab: []const u8) void {
     if (res) |r| gpa.free(r);
 }
 
+fn paneSplit(tab: []const u8, agent: []const u8) ?[]u8 {
+    var args: std.ArrayList(u8) = .empty;
+    defer args.deinit(gpa);
+    args.appendSlice(gpa, "{\"tab\":\"") catch return null;
+    escapeJson(&args, tab);
+    args.appendSlice(gpa, "\",\"agent\":\"") catch return null;
+    escapeJson(&args, agent);
+    args.appendSlice(gpa, "\",\"horiz\":true}") catch return null;
+    const z = gpa.dupeZ(u8, args.items) catch return null;
+    defer gpa.free(z);
+    const res = callOp("pane.split", z.ptr) orelse return null;
+    defer gpa.free(res);
+    const p = jsonGet(res, "pane");
+    if (p.len == 0) return null;
+    return gpa.dupe(u8, p) catch null;
+}
+
+// Everything the step tells its models, minus where to put the answer.
+fn buildPrompt(buf: *std.ArrayList(u8), dir: []const u8, raw: []const u8, step: u32) void {
+    const n = stepCount(raw);
+    var skill = jsonGet(stepNth(raw, step), "name");
+    if (skill.len == 0) skill = "do";
+    var nbuf: [16]u8 = undefined;
+    const nth = std.fmt.bufPrint(&nbuf, "{d} of {d}", .{ step + 1, n }) catch "1";
+    buf.appendSlice(gpa, "Workflow step ") catch return;
+    buf.appendSlice(gpa, nth) catch return;
+    buf.appendSlice(gpa, ": ") catch return;
+    buf.appendSlice(gpa, skill) catch return;
+    buf.appendSlice(gpa, "\nSteps: ") catch return;
+    var si: u32 = 0;
+    while (si < n) : (si += 1) {
+        if (si > 0) buf.appendSlice(gpa, " → ") catch return;
+        if (si == step) buf.appendSlice(gpa, "[") catch return;
+        const sn = jsonGet(stepNth(raw, si), "name");
+        buf.appendSlice(gpa, if (sn.len > 0) sn else "step") catch return;
+        if (si == step) buf.appendSlice(gpa, "]") catch return;
+    }
+    buf.appendSlice(gpa, "\nTask: ") catch return;
+    buf.appendSlice(gpa, jsonGet(raw, "task")) catch return;
+    buf.appendSlice(gpa, "\n") catch return;
+    if (step == 0) return;
+    // Fan-in: every model of the previous step, named by who wrote it.
+    const prev_n = modelCount(raw, step - 1);
+    const prev_name = jsonGet(stepNth(raw, step - 1), "name");
+    var pi: u32 = 0;
+    while (pi < prev_n) : (pi += 1) {
+        const op = modelFile(dir, step - 1, pi, "out.md") orelse continue;
+        defer gpa.free(op);
+        const prev = readCapped(op, if (prev_n > 1) 3000 else 6000);
+        if (prev.len == 0) continue;
+        defer gpa.free(prev);
+        buf.appendSlice(gpa, "\n") catch return;
+        buf.appendSlice(gpa, modelAgent(raw, step - 1, pi)) catch return;
+        buf.appendSlice(gpa, " wrote for step \"") catch return;
+        buf.appendSlice(gpa, if (prev_name.len > 0) prev_name else "step") catch return;
+        buf.appendSlice(gpa, "\":\n") catch return;
+        buf.appendSlice(gpa, prev) catch return;
+        buf.appendSlice(gpa, "\n") catch return;
+    }
+    if (prev_n > 1)
+        buf.appendSlice(gpa, "\nThose came from different models working on the same step. Reconcile them rather than picking one blindly.\n") catch return;
+}
+
 fn startStep(dir: []const u8, raw: []const u8, step: u32) void {
     const n = stepCount(raw);
     if (n == 0 or step >= n) {
         rewriteJob(dir, raw, "status", "done", null, null);
         return;
     }
-    const obj = stepNth(raw, step);
-    var skill = jsonGet(obj, "name");
-    if (skill.len == 0) skill = "do";
-    if (isHuman(raw, step)) {
-        rewriteJob(dir, raw, "status", "human", "pane", "");
-        logMsg("pipeline waiting for human");
+    const models = modelCount(raw, step);
+    if (models == 0) {
+        fail(dir, raw, "this step has no model to run it");
         return;
     }
-    var dbuf: [8]u8 = undefined;
-    const dname = std.fmt.bufPrint(&dbuf, "{d}", .{step}) catch return;
-    const sd = std.fs.path.join(gpa, &.{ dir, dname }) catch return;
+    // Hold the step back rather than flooding the machine with agents.
+    var agents_needed: u32 = 0;
+    var ci: u32 = 0;
+    while (ci < models) : (ci += 1) {
+        if (!modelIsHuman(raw, step, ci)) agents_needed += 1;
+    }
+    if (agents_needed > 0 and active_models + agents_needed > kMaxActive) {
+        if (!std.mem.eql(u8, jsonGet(raw, "status"), "queued"))
+            rewriteJob(dir, raw, "status", "queued", null, null);
+        return;
+    }
+
+    var sbuf: [8]u8 = undefined;
+    const sname = std.fmt.bufPrint(&sbuf, "{d}", .{step}) catch return;
+    const sd = std.fs.path.join(gpa, &.{ dir, sname }) catch return;
     defer gpa.free(sd);
     const sdz = gpa.dupeZ(u8, sd) catch return;
     defer gpa.free(sdz);
     _ = mkdir(sdz, 0o700);
-    const ag = stageAgent(raw, step);
-    const fresh = std.mem.eql(u8, jsonGet(raw, "new_tab"), "true");
-    var pane_owned: ?[]u8 = if (fresh) null else loadPane(dir, ag);
-    var tab_owned: ?[]u8 = if (fresh) null else loadTab(dir, ag);
-    var made_tab = false;
-    if (pane_owned == null) {
-        var args_buf: [128]u8 = undefined;
-        const args = std.fmt.bufPrintZ(&args_buf, "{{\"agent\":\"{s}\"}}", .{ag}) catch return;
-        const res = callOp("tab.add", args.ptr) orelse {
-            fail(dir, raw, "could not open a tab for the agent");
-            return;
-        };
-        const p = jsonGet(res, "pane");
-        const t = jsonGet(res, "tab");
-        if (p.len > 0) savePane(dir, ag, p);
-        if (t.len > 0) saveTab(dir, ag, t);
-        gpa.free(res);
-        if (tab_owned) |old| gpa.free(old);
-        pane_owned = loadPane(dir, ag);
-        tab_owned = loadTab(dir, ag);
-        made_tab = true;
-    }
-    defer if (pane_owned) |p| gpa.free(p);
-    defer if (tab_owned) |t| gpa.free(t);
-    const pane = if (pane_owned) |p| std.mem.trim(u8, p, " \n\r\t") else "";
-    const tab = if (tab_owned) |t| std.mem.trim(u8, t, " \n\r\t") else "";
-    if (pane.len == 0) {
-        fail(dir, raw, "the new tab reported no pane");
-        return;
-    }
-    // Focus is what mounts a freshly created tab, so a new tab has to be
-    // shown. A reused one is already alive: leave the user where they are.
-    if (made_tab) focusTab(tab);
-    rewriteJob(dir, raw, "pane", pane, "status", "arming");
-    if (tab.len > 0) {
-        const jp0 = std.fs.path.join(gpa, &.{ dir, "job.json" }) catch return;
-        defer gpa.free(jp0);
-        const raw_tab = readFile(jp0) orelse return;
-        defer gpa.free(raw_tab);
-        rewriteJob(dir, raw_tab, "tab", tab, null, null);
-    }
-    const task = jsonGet(raw, "task");
+
     var prompt: std.ArrayList(u8) = .empty;
     defer prompt.deinit(gpa);
-    var nbuf: [16]u8 = undefined;
-    const nth = std.fmt.bufPrint(&nbuf, "{d} of {d}", .{ step + 1, n }) catch "1";
-    prompt.appendSlice(gpa, "Workflow step ") catch return;
-    prompt.appendSlice(gpa, nth) catch return;
-    prompt.appendSlice(gpa, ": ") catch return;
-    prompt.appendSlice(gpa, skill) catch return;
-    prompt.appendSlice(gpa, "\nSteps: ") catch return;
-    var si: u32 = 0;
-    while (si < n) : (si += 1) {
-        if (si > 0) prompt.appendSlice(gpa, " → ") catch return;
-        if (si == step) prompt.appendSlice(gpa, "[") catch return;
-        const sn = jsonGet(stepNth(raw, si), "name");
-        prompt.appendSlice(gpa, if (sn.len > 0) sn else "step") catch return;
-        if (si == step) prompt.appendSlice(gpa, "]") catch return;
+    buildPrompt(&prompt, dir, raw, step);
+
+    // One tab for the step. A single model may carry on in the tab it used
+    // before; models that share a step each need their own pane.
+    var tab_owned: ?[]u8 = null;
+    var first_pane: ?[]u8 = null;
+    const fresh = std.mem.eql(u8, jsonGet(raw, "new_tab"), "true");
+    const solo = models == 1;
+    const lead_agent = modelAgent(raw, step, 0);
+    if (solo and !fresh and !modelIsHuman(raw, step, 0)) {
+        first_pane = loadPane(dir, lead_agent);
+        tab_owned = loadTab(dir, lead_agent);
     }
-    prompt.appendSlice(gpa, "\nTask: ") catch return;
-    prompt.appendSlice(gpa, task) catch return;
-    prompt.appendSlice(gpa, "\n") catch return;
-    if (step > 0) {
-        var prev_buf: [32]u8 = undefined;
-        const prev_rel = std.fmt.bufPrint(&prev_buf, "{d}/out.md", .{step - 1}) catch "";
-        if (prev_rel.len > 0) {
-            const prev_path = std.fs.path.join(gpa, &.{ dir, prev_rel }) catch "";
-            if (prev_path.len > 0) {
-                const prev = readCapped(prev_path, 6000);
-                if (prev.len > 0) {
-                    const prev_name = jsonGet(stepNth(raw, step - 1), "name");
-                    prompt.appendSlice(gpa, "Previous step \"") catch return;
-                    prompt.appendSlice(gpa, if (prev_name.len > 0) prev_name else "step") catch return;
-                    prompt.appendSlice(gpa, "\" wrote:\n") catch return;
-                    prompt.appendSlice(gpa, prev) catch return;
-                    prompt.appendSlice(gpa, "\n") catch return;
-                }
-                if (prev.len > 0) gpa.free(prev);
-                gpa.free(prev_path);
+    var made_tab = false;
+    var mi: u32 = 0;
+    while (mi < models) : (mi += 1) {
+        const md = modelDir(dir, step, mi) orelse return;
+        defer gpa.free(md);
+        const mdz = gpa.dupeZ(u8, md) catch return;
+        defer gpa.free(mdz);
+        _ = mkdir(mdz, 0o700);
+
+        if (modelIsHuman(raw, step, mi)) {
+            writeModelState(dir, step, mi, "human", "", time(null), false, 0, "");
+            continue;
+        }
+        const agent = modelAgent(raw, step, mi);
+        var pane_owned: ?[]u8 = null;
+        if (mi == 0 and first_pane != null) {
+            pane_owned = first_pane;
+            first_pane = null;
+        } else if (!made_tab and tab_owned == null) {
+            var ab: [128]u8 = undefined;
+            const args = std.fmt.bufPrintZ(&ab, "{{\"agent\":\"{s}\"}}", .{agent}) catch return;
+            const res = callOp("tab.add", args.ptr) orelse {
+                fail(dir, raw, "could not open a tab for the agent");
+                return;
+            };
+            defer gpa.free(res);
+            const p = jsonGet(res, "pane");
+            const t = jsonGet(res, "tab");
+            if (p.len > 0) pane_owned = gpa.dupe(u8, p) catch null;
+            if (t.len > 0) tab_owned = gpa.dupe(u8, t) catch null;
+            if (solo) {
+                if (p.len > 0) savePane(dir, agent, p);
+                if (t.len > 0) saveTab(dir, agent, t);
+            }
+            made_tab = true;
+        } else if (tab_owned) |t| {
+            pane_owned = paneSplit(std.mem.trim(u8, t, " \n\r\t"), agent);
+            if (pane_owned == null) {
+                fail(dir, raw, "could not split the step's tab for another model");
+                return;
             }
         }
+        const pane_raw = pane_owned orelse {
+            fail(dir, raw, "the step's tab reported no pane");
+            return;
+        };
+        defer gpa.free(pane_raw);
+        const pane = std.mem.trim(u8, pane_raw, " \n\r\t");
+        if (pane.len == 0) {
+            fail(dir, raw, "the step's tab reported no pane");
+            return;
+        }
+        const pp = modelFile(dir, step, mi, "prompt.txt") orelse return;
+        defer gpa.free(pp);
+        var full: std.ArrayList(u8) = .empty;
+        defer full.deinit(gpa);
+        full.appendSlice(gpa, prompt.items) catch return;
+        full.appendSlice(gpa, "Do only this step. Do not start the next one and do not ask the user to continue.\nWrite the result to ") catch return;
+        full.appendSlice(gpa, md) catch return;
+        full.appendSlice(gpa, "/out.md\nWhen that file is written, create ") catch return;
+        full.appendSlice(gpa, md) catch return;
+        full.appendSlice(gpa, "/DONE containing ok, then stop.\n") catch return;
+        writeFile(pp, full.items);
+        writeModelState(dir, step, mi, "arming", pane, time(null), false, 0, "");
+        active_models += 1;
     }
-    prompt.appendSlice(gpa, "Do only the step in brackets. Do not start the next step and do not ask the user to continue.\nWrite the result to ") catch return;
-    prompt.appendSlice(gpa, sd) catch return;
-    prompt.appendSlice(gpa, "/out.md\nWhen that file is written, create ") catch return;
-    prompt.appendSlice(gpa, sd) catch return;
-    prompt.appendSlice(gpa, "/DONE containing ok, then stop.\n") catch return;
-    // The tab we just asked for has no pty yet — its process is still being
-    // spawned. Park the prompt and let the tick send it once the pane can
-    // take keystrokes. Typing now would go straight into the void.
-    const pp = std.fs.path.join(gpa, &.{ sd, "prompt.txt" }) catch return;
-    defer gpa.free(pp);
-    writeFile(pp, prompt.items);
-    var now_buf: [24]u8 = undefined;
-    const now_s = std.fmt.bufPrint(&now_buf, "{d}", .{time(null)}) catch return;
-    const jp = std.fs.path.join(gpa, &.{ dir, "job.json" }) catch return;
-    defer gpa.free(jp);
-    const raw2 = readFile(jp) orelse return;
-    defer gpa.free(raw2);
-    rewriteJob(dir, raw2, "started_s", now_s, "had_busy", "false");
-    var msg_buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "step {d} armed on pane {s}", .{ step + 1, pane }) catch "step armed";
-    logLine(dir, msg);
-}
-
-// How long the agent gets to come up before we call it broken.
-const kArmTimeout: i64 = 45;
-// A TUI that has just settled needs a beat before it owns the keyboard.
-const kArmSettle: i64 = 2;
-
-fn armStep(dir: []const u8, raw: []const u8, step: u32, pane: []const u8) void {
-    if (pane.len == 0) {
-        fail(dir, raw, "no pane to send the step to");
-        return;
+    if (tab_owned) |t| {
+        defer gpa.free(t);
+        const tab = std.mem.trim(u8, t, " \n\r\t");
+        if (made_tab) focusTab(tab);
+        rewriteJob(dir, raw, "status", "running", "pane", "");
+        const jp0 = std.fs.path.join(gpa, &.{ dir, "job.json" }) catch return;
+        defer gpa.free(jp0);
+        const raw2 = readFile(jp0) orelse return;
+        defer gpa.free(raw2);
+        rewriteJob(dir, raw2, "tab", tab, "started_s", "now");
+    } else {
+        rewriteJob(dir, raw, "status", "running", "started_s", "now");
     }
-    const started = std.fmt.parseInt(i64, jsonGet(raw, "started_s"), 10) catch 0;
-    const now = time(null);
-    const act = paneActivity(pane) orelse {
-        noteMiss(dir, raw);
-        return;
-    };
-    if (act == 0) {
-        if (started > 0 and now >= started + kArmTimeout)
-            fail(dir, raw, "the agent never started — open its tab to see why");
-        return;
-    }
-    // 3 = still working: booting. Remember it, so a later standby means ready.
-    if (act == 3) {
-        if (!std.mem.eql(u8, jsonGet(raw, "had_busy"), "true"))
-            rewriteJob(dir, raw, "had_busy", "true", null, null);
-        return;
-    }
-    if (started > 0 and now < started + kArmSettle) return;
-    var dbuf: [24]u8 = undefined;
-    const dname = std.fmt.bufPrint(&dbuf, "{d}/prompt.txt", .{step}) catch return;
-    const pp = std.fs.path.join(gpa, &.{ dir, dname }) catch return;
-    defer gpa.free(pp);
-    const prompt = readFile(pp) orelse {
-        fail(dir, raw, "the step prompt went missing");
-        return;
-    };
-    defer gpa.free(prompt);
-    if (!sendPrompt(pane, prompt)) {
-        if (started > 0 and now >= started + kArmTimeout)
-            fail(dir, raw, "the agent pane would not take the prompt");
-        return;
-    }
-    var now_buf: [24]u8 = undefined;
-    const now_s = std.fmt.bufPrint(&now_buf, "{d}", .{now}) catch return;
-    rewriteJob(dir, raw, "status", "running", "started_s", now_s);
-    const jp = std.fs.path.join(gpa, &.{ dir, "job.json" }) catch return;
-    defer gpa.free(jp);
-    const raw2 = readFile(jp) orelse return;
-    defer gpa.free(raw2);
-    rewriteJob(dir, raw2, "had_busy", "false", null, null);
-    var msg_buf: [48]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "step {d} prompt sent", .{step + 1}) catch "prompt sent";
-    logLine(dir, msg);
+    if (first_pane) |fp| gpa.free(fp);
+    var mb: [96]u8 = undefined;
+    logLine(dir, std.fmt.bufPrint(&mb, "step {d} armed with {d} model(s)", .{ step + 1, models }) catch "step armed");
 }
 
 fn rewriteJob(dir: []const u8, raw: []const u8, k1: []const u8, v1: []const u8, k2: ?[]const u8, v2: ?[]const u8) void {
@@ -744,8 +965,11 @@ fn rewriteJob(dir: []const u8, raw: []const u8, k1: []const u8, v1: []const u8, 
             started = std.fmt.bufPrint(&now_buf, "{d}", .{time(null)}) catch "0";
         } else started = v1;
     }
+    var now_buf2: [24]u8 = undefined;
     if (k2) |k| {
-        const v = v2 orelse "";
+        var v = v2 orelse "";
+        if (std.mem.eql(u8, k, "started_s") and std.mem.eql(u8, v, "now"))
+            v = std.fmt.bufPrint(&now_buf2, "{d}", .{time(null)}) catch "0";
         if (std.mem.eql(u8, k, "pane")) pane = v;
         if (std.mem.eql(u8, k, "tab")) tab = v;
         if (std.mem.eql(u8, k, "status")) status = v;

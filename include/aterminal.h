@@ -61,6 +61,7 @@ const char *at_store_active_pane(const ATStore *store, uint32_t workspace, uint3
 int at_store_set_active_pane(ATStore *store, uint32_t workspace, uint32_t tab, const char *pane_id);
 int at_store_set_split_ratio(ATStore *store, uint32_t index, float ratio);
 int at_store_split(ATStore *store, uint32_t workspace, uint32_t tab, int horiz);
+int at_store_set_pane_agent(ATStore *store, uint32_t workspace, uint32_t tab, const char *pane_id, const char *agent);
 int at_store_close_pane(ATStore *store, uint32_t workspace, uint32_t tab, const char *pane_id);
 uint32_t at_store_history_count(const ATStore *store);
 const char *at_store_history_session(const ATStore *store, uint32_t index);

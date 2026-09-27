@@ -1509,6 +1509,22 @@ export fn at_store_set_active_pane(ptr: ?*ATStore, workspace: u32, tab: u32, pan
     return 0;
 }
 
+/// Point one pane at a different agent. A split copies the agent it grew
+/// from, so a caller that wants two models side by side needs this.
+export fn at_store_set_pane_agent(ptr: ?*ATStore, workspace: u32, tab: u32, pane_id: ?[*:0]const u8, agent: ?[*:0]const u8) callconv(.c) c_int {
+    const store = asStore(ptr) orelse return -1;
+    if (workspace >= store.workspaces.len or pane_id == null or agent == null) return -1;
+    const ws = &store.workspaces[workspace];
+    if (tab >= ws.tabs.len) return -1;
+    const node = findPane(ws.tabs[tab].root, std.mem.span(pane_id.?)) orelse return -1;
+    const copied = dupZ(std.mem.span(agent.?)) catch return -1;
+    gpa.free(node.agent);
+    node.agent = copied;
+    store.dirty = true;
+    save(store) catch {};
+    return 0;
+}
+
 export fn at_store_set_split_ratio(ptr: ?*ATStore, index: u32, ratio: f32) callconv(.c) c_int {
     const store = asStore(ptr) orelse return -1;
     if (index >= store.layout_n) return -1;

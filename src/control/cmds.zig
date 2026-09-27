@@ -22,6 +22,8 @@ extern fn at_store_tab_agent(ptr: ?*const anyopaque, workspace: u32, tab: u32) ?
 extern fn at_store_tab_name(ptr: ?*const anyopaque, workspace: u32, tab: u32) ?[*:0]const u8;
 extern fn at_store_set_active(ptr: ?*anyopaque, index: i32) void;
 extern fn at_store_set_active_tab(ptr: ?*anyopaque, workspace: u32, tab: i32) c_int;
+extern fn at_store_active_tab(ptr: ?*const anyopaque, workspace: u32) i32;
+extern fn at_store_active_pane(ptr: ?*const anyopaque, workspace: u32, tab: u32) ?[*:0]const u8;
 
 extern fn at_control_store() ?*anyopaque;
 
@@ -33,6 +35,8 @@ var ui_pane_activity: ?*const fn (?*anyopaque, ?[*:0]const u8) callconv(.c) c_in
 var ui_tab_add: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int = null;
 var ui_focus_ws: ?*const fn (?*anyopaque, ?[*:0]const u8) callconv(.c) c_int = null;
 var ui_focus_tab: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int = null;
+var ui_pane_split: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, c_int) callconv(.c) c_int = null;
+var ui_pane_set_agent: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int = null;
 
 pub fn bindUi(
     ctx: ?*anyopaque,
@@ -42,6 +46,8 @@ pub fn bindUi(
     tab_add: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int,
     focus_ws: ?*const fn (?*anyopaque, ?[*:0]const u8) callconv(.c) c_int,
     focus_tab: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int,
+    pane_split: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, c_int) callconv(.c) c_int,
+    pane_set_agent: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int,
 ) void {
     ui_ctx = ctx;
     ui_reload = reload;
@@ -50,6 +56,8 @@ pub fn bindUi(
     ui_tab_add = tab_add;
     ui_focus_ws = focus_ws;
     ui_focus_tab = focus_tab;
+    ui_pane_split = pane_split;
+    ui_pane_set_agent = pane_set_agent;
 }
 
 extern fn getpid() c_int;
@@ -188,6 +196,54 @@ fn tabAdd(_: *anyopaque, args: []const u8, _: bus.Cap, out: *std.ArrayList(u8)) 
     out.appendSlice(gpa, "{\"tab\":\"") catch return error.Internal;
     out.appendSlice(gpa, std.mem.span(tid)) catch return error.Internal;
     out.appendSlice(gpa, "\",\"pane\":\"") catch return error.Internal;
+    out.appendSlice(gpa, std.mem.span(pane)) catch return error.Internal;
+    out.appendSlice(gpa, "\"}") catch return error.Internal;
+}
+
+fn paneSplit(_: *anyopaque, args: []const u8, _: bus.Cap, out: *std.ArrayList(u8)) bus.BusError!void {
+    const split = ui_pane_split orelse return error.Unavailable;
+    var p = json.Parser{ .src = args };
+    p.eat('{') catch return error.BadArgs;
+    var tab: []const u8 = "";
+    var agent: []const u8 = "";
+    var horiz = true;
+    var first = true;
+    while (true) {
+        p.skipWs();
+        if (p.peek() == '}') break;
+        if (!first) p.eat(',') catch return error.BadArgs;
+        first = false;
+        const k = p.string() catch return error.BadArgs;
+        p.eat(':') catch return error.BadArgs;
+        if (std.mem.eql(u8, k, "tab")) {
+            tab = p.string() catch return error.BadArgs;
+        } else if (std.mem.eql(u8, k, "agent")) {
+            agent = p.string() catch return error.BadArgs;
+        } else if (std.mem.eql(u8, k, "horiz")) {
+            horiz = p.boolean() catch return error.BadArgs;
+        } else {
+            p.skipValue() catch return error.BadArgs;
+        }
+    }
+    if (tab.len == 0) return error.BadArgs;
+    const store = at_control_store() orelse return error.Unavailable;
+    const tab_z = gpa.dupeZ(u8, tab) catch return error.Internal;
+    defer gpa.free(tab_z);
+    if (split(ui_ctx, null, tab_z.ptr, if (horiz) 1 else 0) != 0) return error.NotFound;
+    // The new pane is the one the layout now makes active.
+    const wi = at_store_active_index(store);
+    if (wi < 0) return error.Internal;
+    const ti = at_store_active_tab(store, @intCast(wi));
+    if (ti < 0) return error.Internal;
+    _ = at_store_layout_build(store, @intCast(wi), @intCast(ti));
+    const pane = at_store_active_pane(store, @intCast(wi), @intCast(ti)) orelse return error.Internal;
+    if (agent.len > 0) {
+        const set = ui_pane_set_agent orelse return error.Unavailable;
+        const ag_z = gpa.dupeZ(u8, agent) catch return error.Internal;
+        defer gpa.free(ag_z);
+        if (set(ui_ctx, pane, ag_z.ptr) != 0) return error.Internal;
+    }
+    out.appendSlice(gpa, "{\"pane\":\"") catch return error.Internal;
     out.appendSlice(gpa, std.mem.span(pane)) catch return error.Internal;
     out.appendSlice(gpa, "\"}") catch return error.Internal;
 }
@@ -424,6 +480,7 @@ pub fn registerAll() void {
     bus.register("pane.input", .{ .input = true }, ctx, paneInput) catch {};
     bus.register("pane.activity", .{ .read = true }, ctx, paneActivity) catch {};
     bus.register("tab.add", .{ .session = true }, ctx, tabAdd) catch {};
+    bus.register("pane.split", .{ .layout = true }, ctx, paneSplit) catch {};
     bus.register("tab.list", .{ .read = true }, ctx, tabList) catch {};
     bus.register("tab.focus", .{ .focus = true }, ctx, tabFocus) catch {};
     bus.register("workspace.list", .{ .read = true }, ctx, workspaceList) catch {};

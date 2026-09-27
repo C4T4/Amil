@@ -39,6 +39,7 @@ pub const ControlUI = extern struct {
     tab_close: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int = null,
     pane_close: ?*const fn (?*anyopaque, ?[*:0]const u8) callconv(.c) c_int = null,
     pane_split: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, c_int) callconv(.c) c_int = null,
+    pane_set_agent: ?*const fn (?*anyopaque, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int = null,
     workspace_create: ?*const fn (?*anyopaque, ?[*:0]const u8, [*c]const ?[*:0]const u8, u32, ?[*:0]const u8) callconv(.c) c_int = null,
     workspace_close: ?*const fn (?*anyopaque, ?[*:0]const u8) callconv(.c) c_int = null,
 };
@@ -85,7 +86,7 @@ export fn at_control_start(store: ?*anyopaque, ui: ?*const anyopaque, io: ?*cons
     if (ui) |p| {
         ui_copy = @as(*const ControlUI, @ptrCast(@alignCast(p))).*;
         have_ui = true;
-        cmds.bindUi(ui_copy.ctx, ui_copy.reload, ui_copy.pane_write, ui_copy.pane_activity, ui_copy.tab_add, ui_copy.focus_workspace, ui_copy.focus_tab);
+        cmds.bindUi(ui_copy.ctx, ui_copy.reload, ui_copy.pane_write, ui_copy.pane_activity, ui_copy.tab_add, ui_copy.focus_workspace, ui_copy.focus_tab, ui_copy.pane_split, ui_copy.pane_set_agent);
     }
 
     const off = getenv("ATERMINAL_CONTROL");
@@ -115,7 +116,7 @@ export fn at_control_stop() callconv(.c) void {
     store_ptr = null;
     have_io = false;
     have_ui = false;
-    cmds.bindUi(null, null, null, null, null, null, null);
+    cmds.bindUi(null, null, null, null, null, null, null, null, null);
     catalog_n = 0;
     if (plugin_dir_z) |z| {
         gpa.free(z);
