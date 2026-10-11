@@ -13,6 +13,93 @@
 #include <math.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
+#include <libproc.h>
+
+/* Background panes run under an at-pty helper that outlives Amil. Only a
+   pane with a live ATTermView used to stop its helper, so closing a tab not
+   opened since launch, or a whole workspace, left helper + agent + MCP
+   servers running for weeks. These find a helper by pane id instead. */
+static NSString *ATPtyDir(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:
+            @"Library/Application Support/ATerminal/pty"];
+}
+
+/* The pid file can outlive its helper and the pid can be reused, so only
+   trust it when that pid is still an at-pty binary. */
+static pid_t ATPtyLiveHelper(NSString *paneId) {
+    NSString *pidPath = [[ATPtyDir() stringByAppendingPathComponent:paneId]
+                         stringByAppendingString:@".sock.pid"];
+    NSString *s = [NSString stringWithContentsOfFile:pidPath encoding:NSUTF8StringEncoding error:nil];
+    int pid = s.length ? atoi(s.UTF8String) : -1;
+    if (pid <= 1 || kill(pid, 0) != 0) return -1;
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return -1;
+    if (![@(path).lastPathComponent isEqualToString:@"at-pty"]) return -1;
+    return pid;
+}
+
+static void ATPtyStopPane(NSString *paneId, NSString *why) {
+    if (!paneId.length) return;
+    pid_t pid = ATPtyLiveHelper(paneId);
+    NSString *sock = [[ATPtyDir() stringByAppendingPathComponent:paneId]
+                      stringByAppendingString:@".sock"];
+    if (pid > 0) {
+        NSLog(@"amil: stopping at-pty %d for pane %@ (%@)", pid, paneId, why);
+        kill(pid, SIGTERM);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (ATPtyLiveHelper(paneId) == pid) {
+                NSLog(@"amil: at-pty %d for pane %@ ignored SIGTERM, sending SIGKILL", pid, paneId);
+                kill(pid, SIGKILL);
+            }
+        });
+        return;
+    }
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if ([fm fileExistsAtPath:sock]) {
+        NSLog(@"amil: removing stale pty socket for pane %@ (%@)", paneId, why);
+        [fm removeItemAtPath:sock error:nil];
+        [fm removeItemAtPath:[sock stringByAppendingString:@".pid"] error:nil];
+    }
+}
+
+static NSArray<NSString *> *ATPanesOfTab(ATStore *store, uint32_t wi, uint32_t ti) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    at_store_layout_build(store, wi, ti);
+    uint32_t n = at_store_layout_count(store);
+    for (uint32_t k = 0; k < n; k++) {
+        if (at_store_layout_kind(store, k) != 0) continue;
+        const char *p = at_store_layout_pane_id(store, k);
+        if (p) [out addObject:@(p)];
+    }
+    return out;
+}
+
+/* A helper whose pane is no longer in state.json can never be reattached:
+   stop it at launch, before any pane view is built. */
+static void ATPtyReapOrphans(ATStore *store) {
+    if (!store) return;
+    NSMutableSet<NSString *> *known = [NSMutableSet set];
+    uint32_t wn = at_store_workspace_count(store);
+    /* An empty store more likely means state.json failed to load than that
+       every pane is gone; never stop live sessions on that guess. */
+    if (wn == 0) {
+        NSLog(@"amil: store has no workspaces, skipping at-pty reap");
+        return;
+    }
+    for (uint32_t wi = 0; wi < wn; wi++) {
+        uint32_t tn = at_store_tab_count(store, wi);
+        for (uint32_t ti = 0; ti < tn; ti++) [known addObjectsFromArray:ATPanesOfTab(store, wi, ti)];
+    }
+    NSArray<NSString *> *files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:ATPtyDir() error:nil];
+    for (NSString *f in files) {
+        if (![f.pathExtension isEqualToString:@"sock"]) continue;
+        NSString *paneId = f.stringByDeletingPathExtension;
+        if ([known containsObject:paneId]) continue;
+        ATPtyStopPane(paneId, @"pane not in state.json at launch");
+    }
+}
 
 typedef NS_ENUM(NSInteger, ATPage) {
     ATPageWorkspace = 0,
@@ -2232,7 +2319,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     if (ap && at_store_close_pane(self.app.store, (uint32_t)wi, (uint32_t)ti, ap) == 0) {
         NSString *key = @(ap);
         ATTermView *tv = _terms[key];
-        [tv killChild];
+        if (tv) [tv killChild];
+        else ATPtyStopPane(key, @"pane closed");
         [tv removeFromSuperview];
         [_terms removeObjectForKey:key];
         [self reload];
@@ -2259,7 +2347,8 @@ static NSString *ATFormatRAM(uint64_t bytes) {
         if (!pid) continue;
         NSString *key = @(pid);
         ATTermView *tv = _terms[key];
-        [tv killChild];
+        if (tv) [tv killChild];
+        else ATPtyStopPane(key, @"tab closed");
         [tv removeFromSuperview];
         [_terms removeObjectForKey:key];
     }
@@ -2369,15 +2458,20 @@ static NSString *ATFormatRAM(uint64_t bytes) {
 - (void)closeActive {
     int32_t i = at_store_active_index(self.app.store);
     if (i < 0) return;
-    const char *idc = at_store_id(self.app.store, (uint32_t)i);
-    if (idc) {
-        NSString *key = @(idc);
-        ATTermView *tv = _terms[key];
-        [tv killChild];
-        [tv removeFromSuperview];
-        [_terms removeObjectForKey:key];
+    /* _terms is keyed by pane id, not workspace id: stop every pane of
+       every tab, or their helpers outlive the workspace. */
+    ATStore *store = self.app.store;
+    uint32_t tn = at_store_tab_count(store, (uint32_t)i);
+    for (uint32_t ti = 0; ti < tn; ti++) {
+        for (NSString *key in ATPanesOfTab(store, (uint32_t)i, ti)) {
+            ATTermView *tv = _terms[key];
+            if (tv) [tv killChild];
+            else ATPtyStopPane(key, @"workspace closed");
+            [tv removeFromSuperview];
+            [_terms removeObjectForKey:key];
+        }
     }
-    at_store_remove_workspace(self.app.store, (uint32_t)i);
+    at_store_remove_workspace(store, (uint32_t)i);
     [self reload];
 }
 
@@ -2857,6 +2951,7 @@ static int ATIoUnwatch(void *ctx, int fd) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     (void)n;
     self.store = at_store_open();
+    ATPtyReapOrphans(self.store);
     [self buildMenu];
     self.wc = [[ATWindowController alloc] init];
     [self.wc showWindow:nil];

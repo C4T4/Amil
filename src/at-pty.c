@@ -13,6 +13,7 @@
 #include <sys/un.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <util.h>
 
@@ -70,8 +71,17 @@ static char g_sock[512];
 static char g_pidfile[512];
 static volatile pid_t g_child = -1;
 
+/* forkpty made the child a session leader, so its pid is also the process
+   group of everything it started (claude, its MCP servers, subshells).
+   Signalling only the child left those reparented to launchd. Amil sends
+   SIGKILL to us 0.4 s after SIGTERM, so the grace period stays under that. */
 static void on_term(int sig) {
-    if (g_child > 1) kill(g_child, SIGTERM);
+    if (g_child > 1) {
+        kill(-g_child, SIGTERM);
+        struct timespec step = { .tv_sec = 0, .tv_nsec = 25000000 };
+        for (int i = 0; i < 12 && kill(-g_child, 0) == 0; i++) nanosleep(&step, NULL);
+        kill(-g_child, SIGKILL);
+    }
     if (g_sock[0]) unlink(g_sock);
     if (g_pidfile[0]) unlink(g_pidfile);
     _exit(128 + sig);
