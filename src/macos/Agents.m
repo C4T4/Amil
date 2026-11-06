@@ -77,6 +77,7 @@ NSArray<NSString *> *ATAgentFlagsForCommand(NSString *command) {
     if (at_control_yolo()) {
         if ([command isEqualToString:@"grok"]) return @[ @"--always-approve" ];
         if ([command isEqualToString:@"claude"]) return @[ @"--dangerously-skip-permissions" ];
+        if ([command isEqualToString:@"codex"]) return @[ @"--dangerously-bypass-approvals-and-sandbox" ];
     } else if ([command isEqualToString:@"grok"]) {
         /* Home config may still say always-approve. The toggle is the switch.
            "default" is grok's ask-me-first mode; "ask" is not a value it takes

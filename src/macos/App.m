@@ -1576,6 +1576,12 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     if (tv) return tv;
     ATStore *store = self.app.store;
     NSString *wanted = ATAgentCommand(agId);
+    if (session.length && ATSessionHeldByOtherPane(session, paneId)) {
+        /* Two tabs saved the same session. Resuming it twice runs two agents
+           on one conversation; this tab starts its own instead. */
+        NSLog(@"amil: pane %@ session %@ already runs in another pane, starting fresh", paneId, session);
+        session = nil;
+    }
     BOOL resume = session.length > 0 && ATSessionExists(wanted, cwd, session);
     if (!session.length && [_restoredTabIds containsObject:paneId]) {
         NSString *found = ATFindSessionId(wanted, cwd);
@@ -1603,6 +1609,21 @@ static NSString *ATFormatRAM(uint64_t bytes) {
     tv.onSession = ^(NSString *sid) {
         if (!sid.length) return;
         at_store_set_tab_session(((ATAppDelegate *)NSApp.delegate).store, key.UTF8String, sid.UTF8String);
+    };
+    tv.claimedSessions = ^NSSet<NSString *> *{
+        ATStore *st = ((ATAppDelegate *)NSApp.delegate).store;
+        NSMutableSet<NSString *> *out = [NSMutableSet new];
+        uint32_t wn = at_store_workspace_count(st);
+        for (uint32_t w = 0; w < wn; w++) {
+            uint32_t tn = at_store_tab_count(st, w);
+            for (uint32_t t = 0; t < tn; t++) {
+                const char *tid = at_store_tab_id(st, w, t);
+                const char *sid = at_store_tab_session(st, w, t);
+                if (!sid || !sid[0] || (tid && [key isEqualToString:@(tid)])) continue;
+                [out addObject:@(sid)];
+            }
+        }
+        return out;
     };
     tv.onFocus = ^(NSString *pid) {
         ATWindowController *self = weak;

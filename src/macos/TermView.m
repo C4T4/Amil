@@ -222,20 +222,38 @@ static NSString *ATCodexIdFromName(NSString *name) {
     return ATIsUUID(sid) ? sid : nil;
 }
 
-static BOOL ATFileMentionsCwd(NSString *path, NSString *cwd) {
+/* First line of a codex rollout is session_meta: its creation time and the
+   exact folder it was started in. */
+static NSDictionary *ATCodexMeta(NSString *path) {
     NSFileHandle *h = [NSFileHandle fileHandleForReadingAtPath:path];
-    if (!h) return NO;
-    NSData *data = [h readDataOfLength:8192];
+    if (!h) return nil;
+    NSData *data = [h readDataOfLength:65536];
     [h closeFile];
-    if (!data.length) return NO;
-    NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return s && cwd.length && [s containsString:cwd];
+    if (!data.length) return nil;
+    NSRange nl = [data rangeOfData:[NSData dataWithBytes:"\n" length:1]
+                           options:0
+                             range:NSMakeRange(0, data.length)];
+    if (nl.location == NSNotFound) return nil;
+    id row = [NSJSONSerialization JSONObjectWithData:[data subdataWithRange:NSMakeRange(0, nl.location)]
+                                             options:0
+                                               error:nil];
+    if (![row isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *payload = row[@"payload"];
+    if (![row[@"type"] isEqual:@"session_meta"] || ![payload isKindOfClass:[NSDictionary class]]) return nil;
+    return payload;
 }
 
-static NSString *ATFindCodex(NSString *cwd, NSDate *since) {
+/* The session a codex pane started after `since`. Codex cannot be told its
+   session id, so this is matched after the fact: created after the spawn, in
+   exactly this folder, and not already owned by another pane. Of those, the
+   earliest, so two panes spawned together each get their own. */
+static NSString *ATFindCodex(NSString *cwd, NSDate *since, NSSet<NSString *> *taken) {
+    if (!cwd.length || !since) return nil;
     NSString *root = [NSHomeDirectory() stringByAppendingPathComponent:@".codex/sessions"];
     NSFileManager *fm = NSFileManager.defaultManager;
     NSCalendar *cal = NSCalendar.currentCalendar;
+    NSISO8601DateFormatter *iso = [NSISO8601DateFormatter new];
+    iso.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
     NSString *best = nil;
     NSDate *bestDate = nil;
     for (NSInteger delta = 0; delta <= 1; delta++) {
@@ -247,13 +265,14 @@ static NSString *ATFindCodex(NSString *cwd, NSDate *since) {
         NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dir error:nil];
         for (NSString *name in items) {
             NSString *sid = ATCodexIdFromName(name);
-            if (!sid) continue;
-            NSString *path = [dir stringByAppendingPathComponent:name];
-            NSDate *d = [fm attributesOfItemAtPath:path error:nil][NSFileModificationDate];
-            if (since && d && [d compare:since] == NSOrderedAscending) continue;
-            if (cwd.length && !ATFileMentionsCwd(path, cwd)) continue;
-            if (!bestDate || [d compare:bestDate] == NSOrderedDescending) {
-                bestDate = d;
+            if (!sid || [taken containsObject:sid]) continue;
+            NSDictionary *meta = ATCodexMeta([dir stringByAppendingPathComponent:name]);
+            if (![meta[@"cwd"] isEqual:cwd]) continue;
+            NSString *ts = meta[@"timestamp"];
+            NSDate *created = [ts isKindOfClass:[NSString class]] ? [iso dateFromString:ts] : nil;
+            if (!created || [created compare:since] == NSOrderedAscending) continue;
+            if (!bestDate || [created compare:bestDate] == NSOrderedAscending) {
+                bestDate = created;
                 best = sid;
             }
         }
@@ -270,7 +289,8 @@ NSString *ATFindSessionId(NSString *command, NSString *cwd) {
                          stringByAppendingPathComponent:enc];
         return ATNewestUUIDInDir(dir, YES, ATLiveGrokSessions());
     }
-    if ([command isEqualToString:@"codex"]) return ATFindCodex(cwd, nil);
+    /* No guess for codex: the newest file in a folder is whichever pane
+       wrote last, so every restored codex tab got the same session. */
     return nil;
 }
 
@@ -305,6 +325,7 @@ BOOL ATSessionExists(NSString *command, NSString *cwd, NSString *sessionId) {
 @property (nonatomic, copy) NSString *sessionId;
 @property (nonatomic, assign) BOOL resumeSession;
 - (void)captureCodexSession;
+- (BOOL)ptyLive;
 - (void)spawn;
 - (void)spawnIfReady;
 - (void)ioctlWinsize;
@@ -331,11 +352,22 @@ static const NSTimeInterval kATRedrawGrace = 1.2;
    footer-only thinking spinner is not missed. */
 static const NSTimeInterval kATTurnFloor = 3.0;
 
+/* Main thread only. Not dispatch_once: the UBSan build flags its
+   __builtin_assume on every call after the first. */
+static NSHashTable<ATTermView *> *ATAllTerms(void) {
+    static NSHashTable *all;
+    if (!all) all = [NSHashTable weakObjectsHashTable];
+    return all;
+}
+
 @implementation ATTermView {
     int _master;
     pid_t _pid;
     pid_t _helperPid;
     dispatch_source_t _src;
+    dispatch_source_t _wsrc;
+    NSMutableData *_outQ;
+    BOOL _outStallLogged;
     GhosttyTerminal _term;
     CGFloat _cw;
     CGFloat _ch;
@@ -423,6 +455,7 @@ static bool at_device_attributes(GhosttyTerminal terminal, void *userdata,
     self.workspaceName = workspace ?: @"";
     self.sessionId = session.length ? session : nil;
     self.resumeSession = resume && self.sessionId.length;
+    [ATAllTerms() addObject:self];
     self.wantsLayer = YES;
     self.layer.backgroundColor = ATColorBg().CGColor;
     _master = -1;
@@ -489,6 +522,15 @@ static bool at_device_attributes(GhosttyTerminal terminal, void *userdata,
         dispatch_source_cancel(_src);
         _src = nil;
     }
+    if (_wsrc) {
+        dispatch_source_cancel(_wsrc);
+        _wsrc = nil;
+    }
+    if (_outQ.length) {
+        NSLog(@"amil: pane %@ closed with %lu input bytes never read", self.paneId, (unsigned long)_outQ.length);
+    }
+    _outQ = nil;
+    _outStallLogged = NO;
     pid_t child = _pid;
     pid_t helper = _helperPid;
     _pid = -1;
@@ -948,6 +990,7 @@ static uint64_t at_pid_footprint(pid_t pid) {
         for (NSUInteger i = 0; i < folders.count; i++) free(folder_cs[i]);
         free(folder_cs);
         [self armPty];
+        [self startCodexCapture:codex];
         return;
     }
 
@@ -1004,24 +1047,57 @@ static uint64_t at_pid_footprint(pid_t pid) {
     int flags = fcntl(master, F_GETFL, 0);
     fcntl(master, F_SETFL, flags | O_NONBLOCK);
     [self armPty];
-    if (codex && !self.sessionId.length) {
-        _spawnAt = [NSDate date];
-        _codexTries = 0;
-        [self captureCodexSession];
+    [self startCodexCapture:codex];
+}
+
+- (void)startCodexCapture:(BOOL)codex {
+    if (!codex || self.sessionId.length) return;
+    /* The spawn moment, a little early: codex stamps its session with its
+       own clock read, which can land a hair before ours. */
+    _spawnAt = [NSDate dateWithTimeIntervalSinceNow:-1.0];
+    _codexTries = 0;
+    [self captureCodexSession];
+}
+
+BOOL ATSessionHeldByOtherPane(NSString *sessionId, NSString *paneId) {
+    if (!sessionId.length) return NO;
+    for (ATTermView *tv in ATAllTerms()) {
+        if ([tv.paneId isEqualToString:paneId] || ![tv ptyLive]) continue;
+        if ([tv.sessionId isEqualToString:sessionId]) return YES;
     }
+    return NO;
+}
+
+- (BOOL)ptyLive {
+    return _master >= 0;
+}
+
+- (NSSet<NSString *> *)sessionsTakenByOthers {
+    NSMutableSet<NSString *> *out = [NSMutableSet new];
+    for (ATTermView *tv in ATAllTerms()) {
+        if (tv == self || !tv.sessionId.length || ![tv ptyLive]) continue;
+        [out addObject:tv.sessionId];
+    }
+    if (self.claimedSessions) [out unionSet:self.claimedSessions() ?: [NSSet set]];
+    return out;
 }
 
 - (void)captureCodexSession {
-    if (self.sessionId.length || _pid <= 0) return;
-    if (_codexTries > 8) return;
+    /* Codex may write its session file only after the first message, so
+       keep looking for as long as the pane runs. */
+    if (self.sessionId.length || _master < 0) return;
     _codexTries += 1;
+    if (_codexTries == 30) {
+        NSLog(@"amil: pane %@ codex session still not found after 60s in %@", self.paneId, self.cwd);
+    }
     __weak ATTermView *weak = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         ATTermView *self = weak;
         if (!self || self.sessionId.length) return;
-        NSString *sid = ATFindCodex(self.cwd, self->_spawnAt);
+        NSString *sid = ATFindCodex(self.cwd, self->_spawnAt, [self sessionsTakenByOthers]);
         if (sid.length) {
+            NSLog(@"amil: pane %@ codex session %@", self.paneId, sid);
             self.sessionId = sid;
             if (self.onSession) self.onSession(sid);
             return;
@@ -1459,20 +1535,68 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     return [super resignFirstResponder];
 }
 
+/* Never block the main thread on the pty. When the child is not reading,
+   the kernel buffer fills and write() returns EAGAIN; spinning on that froze
+   the whole app. Leftover bytes wait in _outQ and drain when writable. */
+static const NSUInteger kATOutStallBytes = 64 * 1024;
+
 - (BOOL)writeBytes:(const void *)p length:(size_t)n {
     if (_master < 0) return NO;
     if (n == 0) return YES;
     const uint8_t *b = p;
     size_t off = 0;
-    while (off < n) {
-        ssize_t w = write(_master, b + off, n - off);
+    if (!_outQ.length) {
+        while (off < n) {
+            ssize_t w = write(_master, b + off, n - off);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN) break;
+                NSLog(@"amil: pane %@ input write failed: %s", self.paneId, strerror(errno));
+                return NO;
+            }
+            off += (size_t)w;
+        }
+        if (off == n) return YES;
+    }
+    if (!_outQ) _outQ = [NSMutableData new];
+    [_outQ appendBytes:b + off length:n - off];
+    if (_outQ.length >= kATOutStallBytes && !_outStallLogged) {
+        _outStallLogged = YES;
+        NSLog(@"amil: pane %@ (%@) is not reading input, %lu bytes waiting",
+              self.paneId, self.command, (unsigned long)_outQ.length);
+    }
+    [self armWriteSource];
+    return YES;
+}
+
+- (void)armWriteSource {
+    if (_wsrc || _master < 0) return;
+    _wsrc = dispatch_source_create(DISPATCH_SOURCE_TYPE_WRITE, (uintptr_t)_master, 0, dispatch_get_main_queue());
+    __weak ATTermView *weak = self;
+    dispatch_source_set_event_handler(_wsrc, ^{ [weak drainOut]; });
+    dispatch_resume(_wsrc);
+}
+
+- (void)drainOut {
+    if (_master < 0) return;
+    while (_outQ.length) {
+        ssize_t w = write(_master, _outQ.bytes, _outQ.length);
         if (w < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN) return;
+            NSLog(@"amil: pane %@ input write failed, dropping %lu bytes: %s",
+                  self.paneId, (unsigned long)_outQ.length, strerror(errno));
+            _outQ.length = 0;
             break;
         }
-        off += (size_t)w;
+        [_outQ replaceBytesInRange:NSMakeRange(0, (NSUInteger)w) withBytes:NULL length:0];
     }
-    return off == n;
+    if (_outStallLogged) NSLog(@"amil: pane %@ is reading input again", self.paneId);
+    _outStallLogged = NO;
+    if (_wsrc) {
+        dispatch_source_cancel(_wsrc);
+        _wsrc = nil;
+    }
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -2037,10 +2161,7 @@ static BOOL ATWordChar(uint32_t cp) {
         if (!path.length) continue;
         NSString *ext = path.pathExtension.lowercaseString;
         static NSSet *imgExt;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            imgExt = [NSSet setWithObjects:@"png", @"jpg", @"jpeg", @"gif", @"webp", @"tif", @"tiff", @"bmp", @"heic", nil];
-        });
+        if (!imgExt) imgExt = [NSSet setWithObjects:@"png", @"jpg", @"jpeg", @"gif", @"webp", @"tif", @"tiff", @"bmp", @"heic", nil];
         if (![imgExt containsObject:ext]) continue;
         [self insertPath:path];
         any = YES;

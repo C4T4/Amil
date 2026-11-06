@@ -22,6 +22,8 @@ typedef NS_ENUM(NSInteger, ATActivity) {
 @property (nonatomic, copy, readonly) NSArray<NSString *> *folders;
 @property (nonatomic, copy, readonly) NSString *workspaceName;
 @property (nonatomic, copy) void (^onSession)(NSString *sessionId);
+/* Sessions saved on other tabs, so codex capture never takes one of them. */
+@property (nonatomic, copy) NSSet<NSString *> *(^claimedSessions)(void);
 @property (nonatomic, copy) NSString *paneId;
 @property (nonatomic, copy) void (^onFocus)(NSString *paneId);
 @property (nonatomic, assign) BOOL keyboardHighlight;
@@ -42,3 +44,5 @@ typedef NS_ENUM(NSInteger, ATActivity) {
 NSString *ATMakeUUID(void);
 NSString *ATFindSessionId(NSString *command, NSString *cwd);
 BOOL ATSessionExists(NSString *command, NSString *cwd, NSString *sessionId);
+/* YES when another pane with a live pty already runs this session. */
+BOOL ATSessionHeldByOtherPane(NSString *sessionId, NSString *paneId);
