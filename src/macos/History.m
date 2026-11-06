@@ -99,7 +99,7 @@ static NSString *ATHAgo(NSDate *date) {
     return [fmt stringFromDate:date] ?: @"";
 }
 
-static ATSessionInfo *ATHMake(NSString *agent, NSString *sid, NSArray<NSString *> *folders, NSString *title, NSDate *updated) {
+static ATSessionInfo *ATHMake(NSString *agent, NSString *sid, NSArray<NSString *> *folders, NSString *title, NSDate *updated, NSString *workspace, NSString *tab) {
     if (!sid.length) return nil;
     ATSessionInfo *s = [ATSessionInfo new];
     s.agentId = agent.length ? agent : @"claude";
@@ -107,6 +107,8 @@ static ATSessionInfo *ATHMake(NSString *agent, NSString *sid, NSArray<NSString *
     s.folders = folders.count ? folders : @[];
     s.cwd = folders.count ? folders[0] : @"";
     s.title = ATHCleanTitle(title) ?: @"untitled";
+    s.workspaceName = workspace ?: @"";
+    s.tabName = tab ?: @"";
     s.updated = updated ?: [NSDate distantPast];
     return s;
 }
@@ -119,6 +121,19 @@ static NSString *ATHFolderLine(ATSessionInfo *s) {
         NSString *t = ATHTilde(f);
         if (t.length) [parts addObject:t];
     }
+    return [parts componentsJoinedByString:@"  ·  "];
+}
+
+static NSString *ATHMeta(ATSessionInfo *s) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    if (s.workspaceName.length) [parts addObject:s.workspaceName];
+    if (s.tabName.length) [parts addObject:s.tabName];
+    NSString *dirs = ATHFolderLine(s);
+    if (dirs.length) [parts addObject:dirs];
+    NSString *ago = ATHAgo(s.updated);
+    if (ago.length) [parts addObject:ago];
+    NSString *agent = ATAgentDisplayName(s.agentId);
+    if (agent.length) [parts addObject:agent];
     return [parts componentsJoinedByString:@"  ·  "];
 }
 
@@ -198,11 +213,15 @@ static NSArray<ATSessionInfo *> *ATHCollect(void) {
         const char *agentc = at_store_history_agent(store, i);
         const char *cwdc = at_store_history_cwd(store, i);
         const char *titlec = at_store_history_title(store, i);
+        const char *wsc = at_store_history_workspace(store, i);
+        const char *tabc = at_store_history_tab(store, i);
         int64_t updated = at_store_history_updated(store, i);
         NSString *sid = sidc ? @(sidc) : nil;
         NSString *agent = agentc ? @(agentc) : @"claude";
         NSString *cwd = cwdc ? @(cwdc) : @"";
         NSString *title = titlec ? @(titlec) : nil;
+        NSString *workspace = wsc ? @(wsc) : @"";
+        NSString *tab = tabc ? @(tabc) : @"";
         NSMutableArray<NSString *> *folders = [NSMutableArray new];
         uint32_t nf = at_store_history_folder_count(store, i);
         for (uint32_t f = 0; f < nf; f++) {
@@ -216,7 +235,7 @@ static NSArray<ATSessionInfo *> *ATHCollect(void) {
             else if ([agent isEqualToString:@"grok"]) title = ATHGrokTitle(main, sid);
         }
         NSDate *date = updated > 0 ? [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)updated] : nil;
-        ATSessionInfo *s = ATHMake(agent, sid, folders, title, date);
+        ATSessionInfo *s = ATHMake(agent, sid, folders, title, date, workspace, tab);
         if (s) [all addObject:s];
     }
     return all;
@@ -303,10 +322,7 @@ static NSArray<ATSessionInfo *> *ATHCollect(void) {
         };
         NSString *title = s.title ?: @"untitled";
         [title drawInRect:NSMakeRect(46, row.origin.y + 10, w - 70, 18) withAttributes:titleAttrs];
-        NSString *dirs = ATHFolderLine(s);
-        NSString *meta = dirs.length
-            ? [NSString stringWithFormat:@"%@  ·  %@  ·  %@", dirs, ATHAgo(s.updated), ATAgentDisplayName(s.agentId)]
-            : [NSString stringWithFormat:@"%@  ·  %@", ATHAgo(s.updated), ATAgentDisplayName(s.agentId)];
+        NSString *meta = ATHMeta(s);
         NSDictionary *metaAttrs = @{
             NSFontAttributeName: metaFont,
             NSForegroundColorAttributeName: ATHMuted(),

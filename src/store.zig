@@ -69,6 +69,8 @@ const HistoryEntry = struct {
     agent: [:0]u8,
     cwd: [:0]u8,
     title: [:0]u8,
+    workspace: [:0]u8,
+    tab: [:0]u8,
     folders: [][:0]u8,
     updated: i64,
 };
@@ -189,8 +191,44 @@ fn freeHistory(h: *HistoryEntry) void {
     gpa.free(h.agent);
     gpa.free(h.cwd);
     gpa.free(h.title);
+    gpa.free(h.workspace);
+    gpa.free(h.tab);
     for (h.folders) |f| gpa.free(f);
     if (h.folders.len > 0) gpa.free(h.folders);
+}
+
+fn replaceZ(slot: *[:0]u8, next: []const u8) void {
+    if (std.mem.eql(u8, slot.*, next)) return;
+    const copied = dupZ(next) catch return;
+    gpa.free(slot.*);
+    slot.* = copied;
+}
+
+fn nodeHasSession(n: *Node, session: []const u8) bool {
+    if (session.len == 0) return false;
+    if (n.kind == .pane and std.mem.eql(u8, n.session, session)) return true;
+    if (n.a) |a| if (nodeHasSession(a, session)) return true;
+    if (n.b) |b| if (nodeHasSession(b, session)) return true;
+    return false;
+}
+
+fn tabHasSession(t: *const Tab, session: []const u8) bool {
+    if (session.len == 0) return false;
+    if (std.mem.eql(u8, t.session, session)) return true;
+    return nodeHasSession(t.root, session);
+}
+
+fn historyKey(h: *const HistoryEntry) []const u8 {
+    if (h.folders.len > 0 and h.folders[0].len > 0) return h.folders[0];
+    return h.cwd;
+}
+
+fn folderHit(ws: *const Workspace, key: []const u8) bool {
+    if (key.len == 0) return false;
+    for (ws.folders) |f| {
+        if (std.mem.eql(u8, f, key)) return true;
+    }
+    return false;
 }
 
 fn dupFolders(src: []const [:0]u8) ![][:0]u8 {
@@ -224,7 +262,7 @@ fn setHistoryFolders(h: *HistoryEntry, folders: []const [:0]u8) void {
 
 const history_cap: usize = 200;
 
-fn touchHistory(store: *Store, session: []const u8, agent: []const u8, folders: []const [:0]u8) void {
+fn touchHistory(store: *Store, session: []const u8, agent: []const u8, folders: []const [:0]u8, workspace_name: []const u8, tab_name: []const u8) void {
     if (session.len == 0) return;
     const now = time(null);
     const cwd: []const u8 = if (folders.len > 0) folders[0] else "";
@@ -238,6 +276,8 @@ fn touchHistory(store: *Store, session: []const u8, agent: []const u8, folders: 
             } else |_| {}
         }
         setHistoryFolders(h, folders);
+        if (workspace_name.len > 0) replaceZ(&h.workspace, workspace_name);
+        replaceZ(&h.tab, tab_name);
         if (i != 0) {
             const tmp = h.*;
             var j = i;
@@ -264,11 +304,28 @@ fn touchHistory(store: *Store, session: []const u8, agent: []const u8, folders: 
         gpa.free(cwd_z);
         return;
     };
+    const workspace_z = dupZ(workspace_name) catch {
+        gpa.free(session_z);
+        gpa.free(agent_z);
+        gpa.free(cwd_z);
+        gpa.free(title_z);
+        return;
+    };
+    const tab_z = dupZ(tab_name) catch {
+        gpa.free(session_z);
+        gpa.free(agent_z);
+        gpa.free(cwd_z);
+        gpa.free(title_z);
+        gpa.free(workspace_z);
+        return;
+    };
     const folders_z = dupFolders(folders) catch {
         gpa.free(session_z);
         gpa.free(agent_z);
         gpa.free(cwd_z);
         gpa.free(title_z);
+        gpa.free(workspace_z);
+        gpa.free(tab_z);
         return;
     };
     var entry = HistoryEntry{
@@ -276,6 +333,8 @@ fn touchHistory(store: *Store, session: []const u8, agent: []const u8, folders: 
         .agent = agent_z,
         .cwd = cwd_z,
         .title = title_z,
+        .workspace = workspace_z,
+        .tab = tab_z,
         .folders = folders_z,
         .updated = now,
     };
@@ -298,7 +357,29 @@ fn seedHistory(store: *Store) void {
     for (store.workspaces) |ws| {
         for (ws.tabs) |t| {
             if (t.session.len == 0) continue;
-            touchHistory(store, t.session, t.agent, ws.folders);
+            touchHistory(store, t.session, t.agent, ws.folders, ws.name, t.name);
+        }
+    }
+}
+
+fn relabelWorkspace(store: *Store, ws: *Workspace, old_name: []const u8) void {
+    for (store.history) |*h| {
+        var live = false;
+        var tab_name: []const u8 = "";
+        for (ws.tabs) |*t| {
+            if (!tabHasSession(t, h.session)) continue;
+            live = true;
+            tab_name = t.name;
+            break;
+        }
+        if (live) {
+            replaceZ(&h.workspace, ws.name);
+            replaceZ(&h.tab, tab_name);
+            continue;
+        }
+        if (!folderHit(ws, historyKey(h))) continue;
+        if (h.workspace.len == 0 or std.mem.eql(u8, h.workspace, old_name)) {
+            replaceZ(&h.workspace, ws.name);
         }
     }
 }
@@ -307,13 +388,22 @@ fn backfillHistoryFolders(store: *Store) void {
     for (store.history) |*h| {
         var found = false;
         for (store.workspaces) |ws| {
-            for (ws.tabs) |t| {
-                if (!std.mem.eql(u8, t.session, h.session)) continue;
+            for (ws.tabs) |*t| {
+                if (!tabHasSession(t, h.session)) continue;
                 setHistoryFolders(h, ws.folders);
+                replaceZ(&h.workspace, ws.name);
+                replaceZ(&h.tab, t.name);
                 found = true;
                 break;
             }
             if (found) break;
+        }
+        if (!found and h.workspace.len == 0) {
+            for (store.workspaces) |ws| {
+                if (!folderHit(&ws, historyKey(h))) continue;
+                replaceZ(&h.workspace, ws.name);
+                break;
+            }
         }
         if (h.folders.len == 0 and h.cwd.len > 0) {
             const one = gpa.alloc([:0]u8, 1) catch continue;
@@ -559,6 +649,10 @@ fn encode(self: *Store) ![]u8 {
         }
         try append(&buf, "], \"title\": \"");
         try jsonEscape(&buf, h.title);
+        try append(&buf, "\", \"workspace\": \"");
+        try jsonEscape(&buf, h.workspace);
+        try append(&buf, "\", \"tab\": \"");
+        try jsonEscape(&buf, h.tab);
         try append(&buf, "\", \"updated\": ");
         const ts = std.fmt.bufPrint(&tbuf, "{d}", .{h.updated}) catch unreachable;
         try append(&buf, ts);
@@ -884,6 +978,8 @@ fn parseState(self: *Store, src: []const u8) !void {
                 var hagent: ?[:0]u8 = null;
                 var hcwd: ?[:0]u8 = null;
                 var htitle: ?[:0]u8 = null;
+                var hworkspace: ?[:0]u8 = null;
+                var htab: ?[:0]u8 = null;
                 var hfolders: std.ArrayList([:0]u8) = .empty;
                 var hupdated: i64 = 0;
                 var first_hk = true;
@@ -905,6 +1001,10 @@ fn parseState(self: *Store, src: []const u8) !void {
                         hcwd = try unescapeAlloc(try p.string());
                     } else if (std.mem.eql(u8, hk, "title")) {
                         htitle = try unescapeAlloc(try p.string());
+                    } else if (std.mem.eql(u8, hk, "workspace")) {
+                        hworkspace = try unescapeAlloc(try p.string());
+                    } else if (std.mem.eql(u8, hk, "tab")) {
+                        htab = try unescapeAlloc(try p.string());
                     } else if (std.mem.eql(u8, hk, "updated")) {
                         hupdated = try p.number64();
                     } else if (std.mem.eql(u8, hk, "folders")) {
@@ -928,6 +1028,8 @@ fn parseState(self: *Store, src: []const u8) !void {
                     if (hagent) |x| gpa.free(x);
                     if (hcwd) |x| gpa.free(x);
                     if (htitle) |x| gpa.free(x);
+                    if (hworkspace) |x| gpa.free(x);
+                    if (htab) |x| gpa.free(x);
                     for (hfolders.items) |f| gpa.free(f);
                     hfolders.deinit(gpa);
                     continue;
@@ -937,6 +1039,8 @@ fn parseState(self: *Store, src: []const u8) !void {
                     if (hagent) |x| gpa.free(x);
                     if (hcwd) |x| gpa.free(x);
                     if (htitle) |x| gpa.free(x);
+                    if (hworkspace) |x| gpa.free(x);
+                    if (htab) |x| gpa.free(x);
                     for (hfolders.items) |f| gpa.free(f);
                     hfolders.deinit(gpa);
                     continue;
@@ -956,6 +1060,8 @@ fn parseState(self: *Store, src: []const u8) !void {
                     .agent = hagent orelse try dupZ("claude"),
                     .cwd = hcwd orelse try dupZ(if (folders_slice.len > 0) folders_slice[0] else ""),
                     .title = htitle orelse try dupZ(""),
+                    .workspace = hworkspace orelse try dupZ(""),
+                    .tab = htab orelse try dupZ(""),
                     .folders = folders_slice,
                     .updated = hupdated,
                 });
@@ -1263,8 +1369,15 @@ export fn at_store_set_name(ptr: ?*ATStore, index: u32, name: ?[*:0]const u8) ca
         setError("out of memory");
         return -1;
     };
+    const old_name = dupZ(store.workspaces[index].name) catch {
+        gpa.free(copied);
+        setError("out of memory");
+        return -1;
+    };
     gpa.free(store.workspaces[index].name);
     store.workspaces[index].name = copied;
+    relabelWorkspace(store, &store.workspaces[index], old_name);
+    gpa.free(old_name);
     _ = at_store_save(ptr);
     return 0;
 }
@@ -1341,6 +1454,11 @@ export fn at_store_set_tab_name(ptr: ?*ATStore, workspace: u32, tab: u32, name: 
     };
     gpa.free(ws.tabs[tab].name);
     ws.tabs[tab].name = copied;
+    for (store.history) |*h| {
+        if (!tabHasSession(&ws.tabs[tab], h.session)) continue;
+        replaceZ(&h.workspace, ws.name);
+        replaceZ(&h.tab, ws.tabs[tab].name);
+    }
     _ = at_store_save(ptr);
     return 0;
 }
@@ -1386,7 +1504,7 @@ export fn at_store_set_tab_session(ptr: ?*ATStore, tab_id: ?[*:0]const u8, sessi
                 t.session = copied;
             }
             const ag = if (pane) |pn| pn.agent else t.agent;
-            touchHistory(store, incoming, ag, ws.folders);
+            touchHistory(store, incoming, ag, ws.folders, ws.name, t.name);
             store.dirty = true;
             save(store) catch {};
             return 0;
@@ -1678,6 +1796,20 @@ export fn at_store_history_title(ptr: ?*const ATStore, index: u32) callconv(.c) 
     if (index >= store.history.len) return null;
     if (store.history[index].title.len == 0) return null;
     return store.history[index].title.ptr;
+}
+
+export fn at_store_history_workspace(ptr: ?*const ATStore, index: u32) callconv(.c) ?[*:0]const u8 {
+    const store = asStore(@constCast(ptr)) orelse return null;
+    if (index >= store.history.len) return null;
+    if (store.history[index].workspace.len == 0) return null;
+    return store.history[index].workspace.ptr;
+}
+
+export fn at_store_history_tab(ptr: ?*const ATStore, index: u32) callconv(.c) ?[*:0]const u8 {
+    const store = asStore(@constCast(ptr)) orelse return null;
+    if (index >= store.history.len) return null;
+    if (store.history[index].tab.len == 0) return null;
+    return store.history[index].tab.ptr;
 }
 
 export fn at_store_history_updated(ptr: ?*const ATStore, index: u32) callconv(.c) i64 {

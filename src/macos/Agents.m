@@ -10,6 +10,7 @@ static const ATAgentInfo kAgents[] = {
     { "grok", "Grok", "grok-4.5", "grok", "grok", NULL },
     { "chatgpt", "ChatGPT", "gpt-4.1", "chatgpt", "codex", NULL },
     { "gemini", "Gemini", "gemini-2.5-pro", "gemini", "gemini", NULL },
+    { "qwen", "Qwen", "qwen3.8-flash-next", "qwen", "opencode", "--agent chat --model qwen/qwen3.8-flash-next" },
 };
 
 uint32_t at_agent_count(void) {

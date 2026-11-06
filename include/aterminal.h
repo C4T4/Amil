@@ -70,6 +70,8 @@ const char *at_store_history_cwd(const ATStore *store, uint32_t index);
 uint32_t at_store_history_folder_count(const ATStore *store, uint32_t index);
 const char *at_store_history_folder(const ATStore *store, uint32_t index, uint32_t folder);
 const char *at_store_history_title(const ATStore *store, uint32_t index);
+const char *at_store_history_workspace(const ATStore *store, uint32_t index);
+const char *at_store_history_tab(const ATStore *store, uint32_t index);
 int64_t at_store_history_updated(const ATStore *store, uint32_t index);
 int at_store_add_tab(ATStore *store, uint32_t workspace, const char *agent);
 int at_store_remove_tab(ATStore *store, uint32_t workspace, uint32_t tab);

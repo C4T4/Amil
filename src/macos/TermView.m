@@ -869,7 +869,9 @@ static uint64_t at_pid_footprint(pid_t pid) {
     BOOL grok = [self.command isEqualToString:@"grok"];
     BOOL gemini = [self.command isEqualToString:@"gemini"];
     BOOL codex = [self.command isEqualToString:@"codex"];
-    BOOL addDirs = claude || grok || gemini || codex;
+    /* Claude accepts --add-dir for extra workspace folders. Grok, Codex, and
+       Gemini do not; passing it makes Grok exit before the TUI starts. */
+    BOOL addDirs = claude;
     NSString *sid = self.sessionId;
     BOOL resume = self.resumeSession && sid.length;
     if (sid.length && grok && ATSessionExists(@"grok", self.cwd, sid)) resume = YES;
@@ -1210,22 +1212,56 @@ static BOOL ATViewportAsksInput(GhosttyTerminal term, uint16_t cols, uint16_t ro
     return pulse || changed;
 }
 
+/* Same origin as drawRect: 6px left, 4px top, fractional cell size.
+   Clamped to the viewport. Row 0 is the top line on screen. */
+- (void)viewportCellAtPoint:(NSPoint)p col:(int *)col row:(int *)row {
+    CGFloat cw = _cw > 0.5 ? _cw : 1;
+    CGFloat ch = _ch > 0.5 ? _ch : 1;
+    int c = (int)floor((p.x - 6.0) / cw);
+    int r = (int)floor((p.y - 4.0) / ch);
+    if (c < 0) c = 0;
+    if (r < 0) r = 0;
+    int maxC = _cols > 0 ? (int)_cols - 1 : 0;
+    int maxR = _rows > 0 ? (int)_rows - 1 : 0;
+    if (c > maxC) c = maxC;
+    if (r > maxR) r = maxR;
+    if (col) *col = c;
+    if (row) *row = r;
+}
+
 - (void)screenCellAtPoint:(NSPoint)p col:(int *)col row:(int *)row {
     if (!_term) {
         *col = 0;
         *row = 0;
         return;
     }
-    int c = (int)floor((p.x - 6) / _cw);
-    int r = (int)floor((p.y - 4) / _ch);
-    if (c < 0) c = 0;
-    if (r < 0) r = 0;
-    if (c >= (int)_cols) c = (int)_cols - 1;
-    if (r >= (int)_rows) r = (int)_rows - 1;
+    int c = 0, r = 0;
+    [self viewportCellAtPoint:p col:&c row:&r];
     GhosttyTerminalScrollbar sb = {0};
     ghostty_terminal_get(_term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &sb);
     *col = c;
     *row = (int)sb.offset + r;
+}
+
+/* Encoder cell size is whole pixels. Menlo 13 is 7.83 wide, which
+   truncates to 7 and reports a column to the right of the cursor.
+   Pass the painted cell as a 1×1 so the report cannot drift. */
+- (void)mouseReportForPoint:(NSPoint)p
+                       size:(GhosttyMouseEncoderSize *)sz
+                        pos:(GhosttyMousePosition *)pos {
+    int col = 0, row = 0;
+    [self viewportCellAtPoint:p col:&col row:&row];
+    uint32_t cols = _cols > 0 ? _cols : 1;
+    uint32_t rows = _rows > 0 ? _rows : 1;
+    *sz = (GhosttyMouseEncoderSize){
+        .size = sizeof(GhosttyMouseEncoderSize),
+        .screen_width = cols,
+        .screen_height = rows,
+        .cell_width = 1,
+        .cell_height = 1,
+    };
+    pos->x = (float)col + 0.5f;
+    pos->y = (float)row + 0.5f;
 }
 
 - (BOOL)cellSelectedAtCol:(int)col screenRow:(int)row {
@@ -1538,15 +1574,9 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     GhosttyMouseFormat drag_fmt = GHOSTTY_MOUSE_FORMAT_SGR;
     ghostty_mouse_encoder_setopt(enc, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &drag_mode);
     ghostty_mouse_encoder_setopt(enc, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &drag_fmt);
-    GhosttyMouseEncoderSize sz = {
-        .size = sizeof(GhosttyMouseEncoderSize),
-        .screen_width = (uint32_t)self.bounds.size.width,
-        .screen_height = (uint32_t)self.bounds.size.height,
-        .cell_width = (uint32_t)MAX(_cw, 1),
-        .cell_height = (uint32_t)MAX(_ch, 1),
-        .padding_left = 6,
-        .padding_top = 4,
-    };
+    GhosttyMouseEncoderSize sz;
+    GhosttyMousePosition pos;
+    [self mouseReportForPoint:p size:&sz pos:&pos];
     ghostty_mouse_encoder_setopt(enc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz);
     bool held = (action != GHOSTTY_MOUSE_ACTION_RELEASE);
     ghostty_mouse_encoder_setopt(enc, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &held);
@@ -1557,7 +1587,7 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     }
     ghostty_mouse_event_set_action(ev, action);
     ghostty_mouse_event_set_button(ev, button);
-    ghostty_mouse_event_set_position(ev, (GhosttyMousePosition){ .x = (float)p.x, .y = (float)p.y });
+    ghostty_mouse_event_set_position(ev, pos);
     GhosttyMods gm = 0;
     if (mods & NSEventModifierFlagShift) gm |= GHOSTTY_MODS_SHIFT;
     if (mods & NSEventModifierFlagControl) gm |= GHOSTTY_MODS_CTRL;
@@ -1577,15 +1607,9 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
     GhosttyMouseEncoder enc = NULL;
     if (ghostty_mouse_encoder_new(NULL, &enc) != GHOSTTY_SUCCESS) return;
     ghostty_mouse_encoder_setopt_from_terminal(enc, _term);
-    GhosttyMouseEncoderSize sz = {
-        .size = sizeof(GhosttyMouseEncoderSize),
-        .screen_width = (uint32_t)self.bounds.size.width,
-        .screen_height = (uint32_t)self.bounds.size.height,
-        .cell_width = (uint32_t)MAX(_cw, 1),
-        .cell_height = (uint32_t)MAX(_ch, 1),
-        .padding_left = 6,
-        .padding_top = 4,
-    };
+    GhosttyMouseEncoderSize sz;
+    GhosttyMousePosition pos;
+    [self mouseReportForPoint:p size:&sz pos:&pos];
     ghostty_mouse_encoder_setopt(enc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz);
     GhosttyMouseEvent ev = NULL;
     if (ghostty_mouse_event_new(NULL, &ev) != GHOSTTY_SUCCESS) {
@@ -1593,7 +1617,7 @@ static NSColor *ATNSRgb(GhosttyColorRgb c) {
         return;
     }
     ghostty_mouse_event_set_action(ev, GHOSTTY_MOUSE_ACTION_PRESS);
-    ghostty_mouse_event_set_position(ev, (GhosttyMousePosition){ .x = (float)p.x, .y = (float)p.y });
+    ghostty_mouse_event_set_position(ev, pos);
     BOOL up = rows < 0;
     int n = (int)(up ? -rows : rows);
     if (n > 3) n = 3;

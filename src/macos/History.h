@@ -6,6 +6,8 @@
 @property (nonatomic, copy) NSString *cwd;
 @property (nonatomic, copy) NSArray<NSString *> *folders;
 @property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) NSString *workspaceName;
+@property (nonatomic, copy) NSString *tabName;
 @property (nonatomic, strong) NSDate *updated;
 @end
 
